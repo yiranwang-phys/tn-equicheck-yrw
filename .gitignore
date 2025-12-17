@@ -21,3 +21,10 @@ venv/
 
 # Outputs (DO NOT COMMIT)
 outputs/
+
+outputs/
+outputs_backup_*.tar.gz
+*.tar.gz
+*.tgz
+__pycache__/
+*.pyc
