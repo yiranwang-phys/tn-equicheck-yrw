@@ -1,86 +1,101 @@
-import json
-from pathlib import Path
-from datetime import datetime
+# scripts/sweep_gamma_trace_fidelity.py
 
+from __future__ import annotations
+from pathlib import Path
 import numpy as np
 import matplotlib.pyplot as plt
-from qiskit import qpy
 
-from mqt.yaqs.digital.equivalence_checker import run as yaqs_equiv_run
+from qiskit import qpy
+from qiskit.quantum_info import Operator
 
 from qem_yrw_project.noise.pauli_jump import apply_pauli_jump_after_each_gate
+from qem_yrw_project.utils.circuit import strip_measurements  # 如果你没有这个，就用下面的 fallback
 
+REPO = Path(__file__).resolve().parents[1]
+OUT_DIR = REPO / "outputs" / "figures" / "sweep_gamma_trace_fidelity"
+IDEAL_QPY = REPO / "outputs" / "ideal" / "twolocal_n6_seed0" / "circuit_ideal.qpy"
+
+N_QUBITS = 6
 
 def load_qpy(path: Path):
     with path.open("rb") as f:
         return qpy.load(f)[0]
 
-
-def strip_measurements(circ):
-    # 只保留 unitary 部分（等价检查默认针对 unitary）
+def strip_meas_fallback(circ):
+    # 如果你项目里没有 strip_measurements，就用这个
+    # （简单粗暴：过滤掉 measure 指令）
     from qiskit import QuantumCircuit
     qc = QuantumCircuit(circ.num_qubits)
     for inst, qargs, cargs in circ.data:
         if inst.name == "measure":
             continue
-        qc.append(inst, qargs, [])
+        qc.append(inst, qargs, cargs)
     return qc
 
+def trace_fidelity(U, V) -> float:
+    # F = |Tr(U† V)| / 2^n  (paper’s trace-based check)
+    d = 2 ** N_QUBITS
+    return float(np.abs(np.trace(U.conj().T @ V)) / d)
+
+def ensure_ideal_exists():
+    if IDEAL_QPY.exists():
+        return
+    raise FileNotFoundError(
+        f"Missing ideal reference: {IDEAL_QPY}\n"
+        "Run: python scripts/make_ideal_twolocal_n6.py"
+    )
 
 def main():
-    repo = Path(__file__).resolve().parents[1]
-    ideal_dir = repo / "outputs" / "ideal" / "twolocal_n6_seed0"
-    ideal_qpy = ideal_dir / "circuit_ideal.qpy"
-    ideal = strip_measurements(load_qpy(ideal_qpy))
+    print(">>> sweep_gamma_trace_fidelity.py")
+    ensure_ideal_exists()
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    # gamma: 0.001 -> 0.8
-    gammas = np.logspace(np.log10(1e-3), np.log10(8e-1), 16)
+    ideal = load_qpy(IDEAL_QPY)
+    try:
+        ideal_u = strip_measurements(ideal)
+    except Exception:
+        ideal_u = strip_meas_fallback(ideal)
 
-    n_traj = 30
-    eps = 1e-13  # 论文同量级的 trace-fidelity tolerance :contentReference[oaicite:3]{index=3}
-    seed0 = 0
+    U = Operator(ideal_u).data
 
-    out_dir = repo / "outputs" / "figures" / "sweep_gamma_fidelity" / datetime.now().strftime("%Y%m%d-%H%M%S")
-    out_dir.mkdir(parents=True, exist_ok=True)
+    gammas = np.geomspace(0.8, 1e-3, 60)   # 0.8 -> 0.001, log-spaced, points=60
+    seeds = list(range(10))                # 每个 gamma 平均 10 个 noisy 实例（你可以改大）
 
-    mean_F = []
-    std_F = []
+    meanF, stdF = [], []
+    rows = []
 
-    for i, g in enumerate(gammas):
+    for g in gammas:
         Fs = []
-        for t in range(n_traj):
-            noisy, meta = apply_pauli_jump_after_each_gate(ideal, gamma=float(g), seed=seed0 + 1000*i + t)
+        for s in seeds:
+            noisy, stats = apply_pauli_jump_after_each_gate(ideal_u, gamma=float(g), seed=int(s))
+            V = Operator(noisy).data
+            F = trace_fidelity(U, V)
+            Fs.append(F)
+            rows.append((g, s, F, getattr(stats, "n_noise_ops", None)))
+        meanF.append(float(np.mean(Fs)))
+        stdF.append(float(np.std(Fs)))
+        print(f"gamma={g:.6g}  F={meanF[-1]:.6g} ± {stdF[-1]:.2g}")
 
-            # YAQS EquiCheck: 同时会算出内部 trace-based fidelity（你也可以在 apply/meta 里自己算）
-            # 这里假设你在 yaqs_equivcheck_latest.py 里已经能拿到 fidelity（你截图里 report 有 fidelity 字段）
-            # 若你的 yaqs_equiv_run 只返回 equivalent，你就用你脚本里同样的“report写法”把 fidelity 拿出来即可。
-            equiv, fidelity = yaqs_equiv_run(ideal, noisy, threshold=eps)  # 若 API 不是这样，照你当前可工作的 wrapper 调整
-            Fs.append(float(fidelity))
-
-        mean_F.append(float(np.mean(Fs)))
-        std_F.append(float(np.std(Fs)))
+    # save csv
+    csv_path = OUT_DIR / "trace_fidelity_vs_gamma.csv"
+    with csv_path.open("w", encoding="utf-8") as f:
+        f.write("gamma,seed,trace_fidelity,n_noise_ops\n")
+        for (g, s, F, nops) in rows:
+            f.write(f"{g},{s},{F},{'' if nops is None else nops}\n")
+    print("Saved:", csv_path)
 
     # plot
     plt.figure()
     plt.xscale("log")
-    plt.errorbar(gammas, mean_F, yerr=std_F, fmt="o-")
-    plt.xlabel("gamma")
-    plt.ylabel("trace fidelity (mean ± std)")
-    plt.title(f"EquiCheck trace fidelity vs gamma (n_traj={n_traj})")
-    fig_path = out_dir / "fidelity_vs_gamma.png"
-    plt.savefig(fig_path, dpi=200, bbox_inches="tight")
+    plt.errorbar(gammas, meanF, yerr=stdF, fmt="o", capsize=2)
+    plt.xlabel("gamma (log scale)")
+    plt.ylabel(r"Trace fidelity  $|Tr(U^\dagger V)|/2^n$")
+    plt.title("Trace fidelity vs noise strength (Pauli-jump)")
+    plt.tight_layout()
 
-    (out_dir / "data.json").write_text(json.dumps({
-        "gammas": gammas.tolist(),
-        "mean_fidelity": mean_F,
-        "std_fidelity": std_F,
-        "n_traj": n_traj,
-        "eps": eps,
-    }, indent=2), encoding="utf-8")
-
+    fig_path = OUT_DIR / "trace_fidelity_vs_gamma.png"
+    plt.savefig(fig_path, dpi=200)
     print("Saved:", fig_path)
-    print("Dir:", out_dir)
-
 
 if __name__ == "__main__":
     main()
