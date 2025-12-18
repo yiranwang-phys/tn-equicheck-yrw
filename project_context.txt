@@ -1,0 +1,4414 @@
+
+==============================
+FILE: ./pyproject.toml
+==============================
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "qem-yrw-project"
+version = "0.1.0"
+description = "Modular experiments for QEM/QER with Ising-type circuits"
+requires-python = ">=3.10"
+dependencies = []
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+
+==============================
+FILE: ./README.md
+==============================
+
+# qem_yrw_project
+
+Modular experiment codebase for QEM/QER (Ising-type circuit baseline).
+
+## Setup
+pip install -r requirements.txt
+pip install -e .
+
+## Run
+python scripts/exp_mc_convergence.py --config configs/mc_convergence.yaml
+
+
+==============================
+FILE: ./configs/mc_convergence.yaml
+==============================
+
+experiment: mc_convergence
+seed: 123
+L: 4
+steps: 6
+gamma: 0.01
+n_max: 200
+batch_sizes: [10, 20, 50, 100, 200]
+n_batches: 30
+
+
+==============================
+FILE: ./scripts/sweep_gamma_state_fidelity_dense.py
+==============================
+
+from __future__ import annotations
+
+import argparse
+import json
+from datetime import datetime
+from pathlib import Path
+
+import numpy as np
+import matplotlib.pyplot as plt
+from numpy.random import default_rng
+from qiskit import qpy
+from qiskit.quantum_info import Statevector
+
+from qem_yrw_project.noise.pauli_jump import apply_pauli_jump_after_each_gate
+
+
+def load_qpy(path: Path):
+    if not path.exists():
+        raise FileNotFoundError(f"Missing: {path}")
+    with path.open("rb") as f:
+        return qpy.load(f)[0]
+
+
+def strip_measurements(circ):
+    c = circ.copy()
+    try:
+        c.remove_final_measurements(inplace=True)
+    except Exception:
+        pass
+
+    out = c.__class__(c.num_qubits, 0)
+    out.global_phase = getattr(c, "global_phase", 0.0)
+    for ci in c.data:
+        if ci.operation.name == "measure":
+            continue
+        out.append(ci.operation, ci.qubits, [])
+    return out
+
+
+def count_injection_sites(circ) -> int:
+    n_sites = 0
+    for ci in circ.data:
+        if ci.operation.name in ("measure", "barrier"):
+            continue
+        n_sites += len(ci.qubits)
+    return n_sites
+
+
+def rolling_mean(y: np.ndarray, window: int) -> np.ndarray:
+    if window <= 1:
+        return y.copy()
+    window = int(window)
+    if window % 2 == 0:
+        window += 1
+    k = np.ones(window, dtype=float) / float(window)
+    ypad = np.pad(y, (window // 2, window // 2), mode="edge")
+    return np.convolve(ypad, k, mode="valid")
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--ideal-qpy", type=str, default="outputs/ideal/twolocal_n6_seed0/circuit_ideal.qpy")
+    ap.add_argument("--gamma-min", type=float, default=1e-3)
+    ap.add_argument("--gamma-max", type=float, default=1e-2)
+    ap.add_argument("--num", type=int, default=4000)
+    ap.add_argument("--shots", type=int, default=200)
+    ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--smooth-window", type=int, default=401)
+    ap.add_argument("--out-root", type=str, default="outputs/sweeps")
+    args = ap.parse_args()
+
+    ideal = strip_measurements(load_qpy(Path(args.ideal_qpy)))
+    n = ideal.num_qubits
+    dim = 2**n
+    n_sites = count_injection_sites(ideal)
+
+    gammas = np.logspace(np.log10(args.gamma_min), np.log10(args.gamma_max), args.num)
+
+    rng = default_rng(args.seed)
+    psi0 = Statevector.from_label("0" * n)
+    psi_ideal = psi0.evolve(ideal)
+
+    single = np.zeros(args.num, dtype=float)
+    mean = np.zeros(args.num, dtype=float)
+
+    for i, g in enumerate(gammas):
+        vals = []
+        for _ in range(args.shots):
+            noisy, _stats = apply_pauli_jump_after_each_gate(ideal, g, rng=rng)
+            psi_noisy = psi0.evolve(noisy)
+            f = float(abs(np.vdot(psi_ideal.data, psi_noisy.data)) ** 2)
+            vals.append(f)
+        single[i] = vals[0]
+        mean[i] = float(np.mean(vals))
+
+    smooth = rolling_mean(mean, args.smooth_window)
+    p_no_jump = (1.0 - gammas) ** n_sites
+
+    ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+    out_dir = Path(args.out_root) / f"statefid_gamma_{args.gamma_min:.0e}_to_{args.gamma_max:.0e}_N{args.num}_shots{args.shots}_n{n}_seed{args.seed}" / ts
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    res = {
+        "metric": "output_state_fidelity",
+        "n_qubits": n,
+        "dim": dim,
+        "n_sites": int(n_sites),
+        "gamma_min": args.gamma_min,
+        "gamma_max": args.gamma_max,
+        "num": int(args.num),
+        "shots": int(args.shots),
+        "seed": int(args.seed),
+        "gammas": gammas.tolist(),
+        "single_shot": single.tolist(),
+        "mean": mean.tolist(),
+    }
+    (out_dir / "results.json").write_text(json.dumps(res, indent=2), encoding="utf-8")
+
+    fig1 = out_dir / "fidelity_vs_gamma_raw.png"
+    plt.figure()
+    plt.scatter(gammas, single, s=6)
+    plt.xscale("log")
+    plt.ylim(-0.05, 1.05)
+    plt.xlabel("gamma (log scale)")
+    plt.ylabel("F_state (single-shot)")
+    plt.title(f"Output-state fidelity (raw), n={n}, shots={args.shots}")
+    plt.grid(True, which="both", linestyle="--", alpha=0.5)
+    plt.tight_layout()
+    plt.savefig(fig1, dpi=200)
+    plt.close()
+
+    fig2 = out_dir / "fidelity_vs_gamma_curve.png"
+    plt.figure()
+    plt.plot(gammas, mean, linewidth=1.0, label=f"MC mean (shots={args.shots})")
+    plt.plot(gammas, smooth, linewidth=2.0, label=f"rolling mean (window={args.smooth_window})")
+    plt.plot(gammas, p_no_jump, linestyle="--", linewidth=2.0, label=f"no-jump prob (1-gamma)^N, N={n_sites}")
+    plt.xscale("log")
+    plt.ylim(-0.05, 1.05)
+    plt.xlabel("gamma (log scale)")
+    plt.ylabel("F_state")
+    plt.title(f"Output-state fidelity (curve), n={n}, sites={n_sites}")
+    plt.grid(True, which="both", linestyle="--", alpha=0.5)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(fig2, dpi=200)
+    plt.close()
+
+    print(f"OUTPUT DIR = {out_dir.resolve()}")
+    print(f"FIG1 = {fig1.resolve()}")
+    print(f"FIG2 = {fig2.resolve()}")
+
+
+if __name__ == "__main__":
+    main()
+
+
+==============================
+FILE: ./scripts/sweep_angle_shift_state_fidelity.py
+==============================
+
+import argparse
+import json
+from dataclasses import asdict
+from datetime import datetime
+from pathlib import Path
+
+import numpy as np
+import matplotlib.pyplot as plt
+
+from qiskit import qpy
+from qiskit import QuantumCircuit
+from qiskit.quantum_info import Statevector, state_fidelity
+
+from qem_yrw_project.noise.pauli_jump import apply_pauli_jump_after_each_gate
+
+
+ROT_NAMES_DEFAULT = {
+    "rx", "ry", "rz",
+    "rxx", "ryy", "rzz", "rzx",
+    "crx", "cry", "crz",
+}
+
+
+def ts():
+    return datetime.now().strftime("%Y%m%d-%H%M%S")
+
+
+def load_qpy(path: Path) -> QuantumCircuit:
+    if not path.exists():
+        raise FileNotFoundError(f"Missing: {path}")
+    with path.open("rb") as f:
+        return qpy.load(f)[0]
+
+
+def strip_measurements(circ: QuantumCircuit) -> QuantumCircuit:
+    out = QuantumCircuit(circ.num_qubits)
+    for inst in circ.data:
+        op = inst.operation
+        if op.name == "measure":
+            continue
+        out.append(op, inst.qubits, inst.clbits)
+    return out
+
+
+def shifted_circuit(circ: QuantumCircuit, delta: float, rot_names: set[str]) -> QuantumCircuit:
+    out = QuantumCircuit(circ.num_qubits)
+    for inst in circ.data:
+        op = inst.operation
+        if op.name in rot_names and hasattr(op, "params") and len(op.params) >= 1:
+            new_params = []
+            for p in op.params:
+                if isinstance(p, (int, float, np.floating)):
+                    new_params.append(float(p) + float(delta))
+                else:
+                    new_params.append(p)
+            new_op = op.copy()
+            new_op.params = new_params
+            out.append(new_op, inst.qubits, inst.clbits)
+        else:
+            out.append(op, inst.qubits, inst.clbits)
+    return out
+
+
+def rolling_mean(y: np.ndarray, window: int) -> np.ndarray:
+    if window <= 1:
+        return y.copy()
+    window = int(window)
+    if window % 2 == 0:
+        window += 1
+    k = np.ones(window, dtype=float) / float(window)
+    ypad = np.pad(y, (window // 2, window // 2), mode="edge")
+    return np.convolve(ypad, k, mode="valid")
+
+
+def parse_args():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--gamma", type=float, default=1e-2)
+
+    ap.add_argument("--delta-min", type=float, default=1e-6)
+    ap.add_argument("--delta-max", type=float, default=1e-1)
+    ap.add_argument("--num-delta", type=int, default=200)
+
+    ap.add_argument("--shots", type=int, default=200)
+    ap.add_argument("--seed", type=int, default=0)
+
+    ap.add_argument("--num-inputs", type=int, default=8)
+
+    ap.add_argument("--smooth-window", type=int, default=21)
+
+    ap.add_argument("--ideal-qpy", type=str, default="outputs/ideal/twolocal_n6_seed0/circuit_ideal.qpy")
+
+    ap.add_argument("--rot-names", type=str, default=",".join(sorted(ROT_NAMES_DEFAULT)))
+    return ap.parse_args()
+
+
+def main():
+    args = parse_args()
+
+    ideal_qpy = Path(args.ideal_qpy)
+    ideal = strip_measurements(load_qpy(ideal_qpy))
+    n = ideal.num_qubits
+
+    rot_names = {s.strip() for s in args.rot_names.split(",") if s.strip()}
+
+    deltas = np.geomspace(args.delta_min, args.delta_max, args.num_delta)
+    deltas = np.concatenate(([0.0], deltas))
+
+    rng = np.random.default_rng(args.seed)
+    inputs = []
+    for _ in range(max(1, args.num_inputs)):
+        bits = rng.integers(0, 2, size=n, dtype=int)
+        inputs.append("".join(str(b) for b in bits))
+
+    ideal_out_states = []
+    for b in inputs:
+        psi_in = Statevector.from_label(b)
+        ideal_out_states.append(psi_in.evolve(ideal))
+
+    outdir = Path("outputs") / "sweeps" / f"angle_shift_gamma{args.gamma:.0e}_n{n}_seed{args.seed}" / ts()
+    outdir.mkdir(parents=True, exist_ok=True)
+
+    mean_fids = []
+    std_fids = []
+    mismatch_fids = []
+
+    for i, d in enumerate(deltas):
+        compiled = shifted_circuit(ideal, d, rot_names)
+        compiled = strip_measurements(compiled)
+
+        mf = []
+        for psi_ideal in ideal_out_states:
+            psi_comp = Statevector.from_label("0" * n).evolve(compiled)
+            mf.append(state_fidelity(psi_ideal, psi_comp))
+        mismatch_fids.append(float(np.mean(mf)))
+
+        shot_vals = []
+        for s in range(args.shots):
+            noisy, _stats = apply_pauli_jump_after_each_gate(compiled, args.gamma, seed=args.seed + 100000 * i + s)
+            noisy = strip_measurements(noisy)
+
+            f_inp = []
+            for b, psi_ideal in zip(inputs, ideal_out_states):
+                psi_in = Statevector.from_label(b)
+                psi_noisy = psi_in.evolve(noisy)
+                f_inp.append(state_fidelity(psi_ideal, psi_noisy))
+            shot_vals.append(float(np.mean(f_inp)))
+
+        shot_vals = np.asarray(shot_vals, dtype=float)
+        mean_fids.append(float(np.mean(shot_vals)))
+        std_fids.append(float(np.std(shot_vals)))
+
+        if (i % max(1, len(deltas) // 10)) == 0 or i == len(deltas) - 1:
+            print(f"progress {i+1}/{len(deltas)}  delta={d:.3e}  meanF={mean_fids[-1]:.6f}")
+
+    mean_fids = np.asarray(mean_fids, dtype=float)
+    std_fids = np.asarray(std_fids, dtype=float)
+    mismatch_fids = np.asarray(mismatch_fids, dtype=float)
+
+    smooth = rolling_mean(mean_fids, args.smooth_window)
+
+    best_idx = int(np.argmax(mean_fids))
+    best = {
+        "delta": float(deltas[best_idx]),
+        "mean_fidelity": float(mean_fids[best_idx]),
+        "std_fidelity": float(std_fids[best_idx]),
+        "mismatch_fidelity_no_noise": float(mismatch_fids[best_idx]),
+    }
+    base = {
+        "delta": float(deltas[0]),
+        "mean_fidelity": float(mean_fids[0]),
+        "std_fidelity": float(std_fids[0]),
+        "mismatch_fidelity_no_noise": float(mismatch_fids[0]),
+    }
+
+    payload = {
+        "gamma": float(args.gamma),
+        "n_qubits": int(n),
+        "rot_names": sorted(list(rot_names)),
+        "deltas": [float(x) for x in deltas],
+        "mean_fidelity": [float(x) for x in mean_fids],
+        "std_fidelity": [float(x) for x in std_fids],
+        "mismatch_fidelity_no_noise": [float(x) for x in mismatch_fids],
+        "best": best,
+        "baseline_delta0": base,
+        "args": vars(args),
+    }
+    (outdir / "results.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+    x = np.asarray(deltas, dtype=float)
+    x_plot = x.copy()
+    linthresh = max(args.delta_min, 1e-12)
+
+    plt.figure()
+    plt.title(f"Angle-shift search (raw points), gamma={args.gamma:.0e}, shots={args.shots}, inputs={len(inputs)}")
+    plt.xscale("symlog", linthresh=linthresh)
+    plt.plot(x_plot, mean_fids, marker="o", linestyle="none")
+    plt.xlabel("delta (symlog)")
+    plt.ylabel("state fidelity (mean over shots)")
+    plt.ylim(-0.02, 1.02)
+    p1 = outdir / "fidelity_vs_delta_points.png"
+    plt.savefig(p1, dpi=200, bbox_inches="tight")
+    plt.close()
+
+    plt.figure()
+    plt.title(f"Angle-shift search (smooth), gamma={args.gamma:.0e}, shots={args.shots}, inputs={len(inputs)}")
+    plt.xscale("symlog", linthresh=linthresh)
+    plt.plot(x_plot, smooth, label=f"rolling mean (window={args.smooth_window})")
+    plt.plot(x_plot, mismatch_fids, linestyle="--", label="no-noise mismatch fidelity")
+    plt.xlabel("delta (symlog)")
+    plt.ylabel("state fidelity")
+    plt.ylim(-0.02, 1.02)
+    plt.legend()
+    p2 = outdir / "fidelity_vs_delta_curve.png"
+    plt.savefig(p2, dpi=200, bbox_inches="tight")
+    plt.close()
+
+    print("WROTE:", str(outdir))
+    print("FIG1 :", str(p1))
+    print("FIG2 :", str(p2))
+    print("BEST :", json.dumps(best))
+
+
+if __name__ == "__main__":
+    main()
+
+
+==============================
+FILE: ./scripts/sweep_gamma_trace_fidelity_dense.py
+==============================
+
+import argparse
+import json
+import time
+from dataclasses import asdict
+from pathlib import Path
+
+import numpy as np
+import matplotlib.pyplot as plt
+
+from qiskit import QuantumCircuit, qpy
+from qiskit.quantum_info import Operator
+
+from qem_yrw_project.noise.pauli_jump import apply_pauli_jump_after_each_gate
+
+
+def now_ts() -> str:
+    return time.strftime("%Y%m%d-%H%M%S")
+
+
+def load_qpy_first(path: Path) -> QuantumCircuit:
+    with path.open("rb") as f:
+        return qpy.load(f)[0]
+
+
+def unitary_part(circ: QuantumCircuit) -> QuantumCircuit:
+    out = QuantumCircuit(circ.num_qubits)
+    for ci in circ.data:
+        op = ci.operation
+        if op.name in ("measure", "reset", "barrier"):
+            continue
+        out.append(op, ci.qubits, [])
+    return out
+
+
+def count_injection_sites(circ_unitary: QuantumCircuit) -> int:
+    n = 0
+    for ci in circ_unitary.data:
+        op = ci.operation
+        if op.name == "barrier":
+            continue
+        if op.num_qubits > 0:
+            n += 1
+    return n
+
+
+def smooth_edge_safe(y: np.ndarray, window: int) -> np.ndarray:
+    if window <= 1:
+        return y
+    w = int(window)
+    if w % 2 == 0:
+        w += 1
+    pad = w // 2
+    ypad = np.pad(y, (pad, pad), mode="edge")
+    kernel = np.ones(w, dtype=float) / float(w)
+    return np.convolve(ypad, kernel, mode="valid")
+
+
+def unitary_overlap_metrics(U_ideal: np.ndarray, U_noisy: np.ndarray) -> tuple[float, float]:
+    d = U_ideal.shape[0]
+    tr = np.trace(U_ideal.conj().T @ U_noisy)
+    phi = float(np.abs(tr) / float(d))
+    f_avg = float((float(d) * (phi * phi) + 1.0) / (float(d) + 1.0))
+    return phi, f_avg
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--gamma-min", type=float, default=1e-4)
+    ap.add_argument("--gamma-max", type=float, default=1.0)
+    ap.add_argument("--num", type=int, default=500)
+    ap.add_argument("--shots", type=int, default=200)
+    ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--smooth-window", type=int, default=31)
+    ap.add_argument("--mode", choices=["proxy", "unitary"], default="proxy")
+    args = ap.parse_args()
+
+    ideal_qpy = Path("outputs/ideal/twolocal_n6_seed0/circuit_ideal.qpy")
+    if not ideal_qpy.exists():
+        raise FileNotFoundError(f"Missing: {ideal_qpy}. Run: python scripts/make_ideal_twolocal_n6.py")
+
+    ideal_meas = load_qpy_first(ideal_qpy)
+    ideal = unitary_part(ideal_meas)
+
+    n_qubits = ideal.num_qubits
+    d = 2**n_qubits
+    n_sites = count_injection_sites(ideal)
+
+    gammas = np.logspace(np.log10(args.gamma_min), np.log10(args.gamma_max), args.num)
+
+    out_dir = Path("outputs/sweeps") / f"gamma_{args.gamma_min:.0e}_to_{args.gamma_max:.0e}_N{args.num}_shots{args.shots}_n{n_qubits}_seed{args.seed}" / now_ts()
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    print(f"ideal qubits: {n_qubits}")
+    print(f"injection sites: {n_sites}")
+    print(f"mode: {args.mode}")
+    print(f"OUTPUT DIR: {out_dir.resolve()}")
+
+    U_ideal = None
+    if args.mode == "unitary":
+        U_ideal = Operator(ideal).data
+
+    p0_list = []
+    phi_mean_list = []
+    favg_mean_list = []
+
+    raw_gamma = []
+    raw_favg = []
+
+    for i, g in enumerate(gammas):
+        n_nojump = 0
+        favg_shots = []
+        phi_shots = []
+
+        for s in range(args.shots):
+            shot_seed = int(args.seed + i * args.shots + s)
+            noisy_meas, stats = apply_pauli_jump_after_each_gate(
+                ideal_meas,
+                float(g),
+                seed=shot_seed,
+                include_measurements=False,
+            )
+            noisy = unitary_part(noisy_meas)
+
+            nojump = int(getattr(stats, "n_noise_ops", 0) == 0)
+            n_nojump += nojump
+
+            if args.mode == "proxy":
+                phi = 1.0 if nojump else 0.0
+                favg = (float(d) * (phi * phi) + 1.0) / (float(d) + 1.0)
+            else:
+                U_noisy = Operator(noisy).data
+                phi, favg = unitary_overlap_metrics(U_ideal, U_noisy)
+
+            favg_shots.append(float(favg))
+            phi_shots.append(float(phi))
+
+            raw_gamma.append(float(g))
+            raw_favg.append(float(favg))
+
+        p0 = float(n_nojump) / float(args.shots)
+        p0_list.append(p0)
+        phi_mean_list.append(float(np.mean(phi_shots)))
+        favg_mean_list.append(float(np.mean(favg_shots)))
+
+        if (i + 1) % max(1, args.num // 10) == 0:
+            print(f"{i+1}/{args.num} gamma={g:.3e}  p0={p0:.4f}  favg_mean={favg_mean_list[-1]:.4f}")
+
+    p0_arr = np.array(p0_list, dtype=float)
+    phi_mean = np.array(phi_mean_list, dtype=float)
+    favg_mean = np.array(favg_mean_list, dtype=float)
+
+    p0_theory = (1.0 - gammas) ** float(n_sites)
+    favg_theory = (1.0 / (float(d) + 1.0)) + (float(d) / (float(d) + 1.0)) * p0_theory
+
+    favg_smooth = smooth_edge_safe(favg_mean, args.smooth_window)
+
+    results = {
+        "n_qubits": n_qubits,
+        "d": d,
+        "n_sites": n_sites,
+        "mode": args.mode,
+        "gamma_min": args.gamma_min,
+        "gamma_max": args.gamma_max,
+        "num": args.num,
+        "shots": args.shots,
+        "seed": args.seed,
+        "smooth_window": args.smooth_window,
+        "gammas": gammas.tolist(),
+        "p0_mc": p0_arr.tolist(),
+        "phi_mean_mc": phi_mean.tolist(),
+        "favg_mean_mc": favg_mean.tolist(),
+    }
+    (out_dir / "results.json").write_text(json.dumps(results, indent=2), encoding="utf-8")
+
+    fig1 = out_dir / "fidelity_vs_gamma_raw.png"
+    plt.figure()
+    plt.xscale("log")
+    plt.scatter(raw_gamma, raw_favg, s=2)
+    plt.xlabel("gamma (log scale)")
+    plt.ylabel("fidelity (per-shot)")
+    plt.title(f"Raw per-shot fidelity vs gamma, n={n_qubits}, sites={n_sites}, mode={args.mode}")
+    plt.tight_layout()
+    plt.savefig(fig1, dpi=200)
+    plt.close()
+
+    fig2 = out_dir / "fidelity_vs_gamma_curve.png"
+    plt.figure()
+    plt.xscale("log")
+    plt.plot(gammas, favg_mean, label=f"MC mean (shots={args.shots})")
+    plt.plot(gammas, favg_smooth, label=f"smooth (window={args.smooth_window})")
+    plt.plot(gammas, favg_theory, "--", label=f"theory from p0=(1-gamma)^sites, sites={n_sites}")
+    plt.xlabel("gamma (log scale)")
+    plt.ylabel("fidelity")
+    plt.title(f"Fidelity vs gamma, n={n_qubits}, mode={args.mode}")
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(fig2, dpi=200)
+    plt.close()
+
+    print(f"FIG1: {fig1.resolve()}")
+    print(f"FIG2: {fig2.resolve()}")
+
+
+if __name__ == "__main__":
+    main()
+
+
+==============================
+FILE: ./scripts/sweep_gamma_equicheck_fidelity.py
+==============================
+
+from __future__ import annotations
+
+from pathlib import Path
+from datetime import datetime
+import csv
+import inspect
+
+import numpy as np
+import matplotlib.pyplot as plt
+from qiskit import qpy
+from qiskit.quantum_info import Operator
+
+from qem_yrw_project.noise.pauli_jump import apply_pauli_jump_after_each_gate
+
+
+IDEAL_QPY = Path("outputs/ideal/twolocal_n6_seed0/circuit_ideal.qpy")
+
+GAMMA_MAX = 8e-1
+GAMMA_MIN = 1e-3
+N_GAMMAS = 60
+
+SEED = 0  # fixed seed per gamma for now (deterministic)
+YAQS_DO_CHECK = True
+
+OUT_BASE = Path("outputs/sweeps") / "gamma_equicheck_tracefidelity" / "twolocal_n6_seed0"
+
+
+def load_qpy(path: Path):
+    if not path.exists():
+        raise FileNotFoundError(f"Missing: {path}. Run: python scripts/make_ideal_twolocal_n6.py")
+    with path.open("rb") as f:
+        return qpy.load(f)[0]
+
+
+def strip_measurements(circ):
+    return circ.remove_final_measurements(inplace=False)
+
+
+def save_circuit_png_or_txt(circ, out_dir: Path, stem: str):
+    out_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        fig = circ.draw(output="mpl", fold=120)
+        fig.savefig(out_dir / f"{stem}.png", dpi=200, bbox_inches="tight")
+        plt.close(fig)
+    except Exception as e:
+        (out_dir / f"{stem}.txt").write_text(str(circ.draw(output="text")), encoding="utf-8")
+        (out_dir / f"{stem}.err.txt").write_text(str(e), encoding="utf-8")
+
+
+def trace_fidelity_unitaries(ideal, noisy) -> float:
+    """Paper-style: |Tr(G * G'^†)| / 2^n  (global phase insensitive via abs)"""
+    u_ideal = Operator(ideal).data
+    u_noisy = Operator(noisy).data
+    d = u_ideal.shape[0]
+    val = np.trace(u_ideal @ u_noisy.conj().T) / d
+    return float(np.abs(val))
+
+
+def yaqs_equivcheck_bool(ideal, noisy) -> bool | None:
+    """
+    Calls mqt.yaqs.digital.equivalence_checker.run in a signature-tolerant way.
+    Returns True/False if available, else None.
+    """
+    try:
+        from mqt.yaqs.digital.equivalence_checker import run as yaqs_run
+    except Exception:
+        return None
+
+    sig = inspect.signature(yaqs_run)
+    kwargs = {}
+    # pass only supported kwargs (keep minimal)
+    for k in ["parallel", "max_bond_dim", "threshold", "eps", "epsilon", "tol", "tolerance"]:
+        if k in sig.parameters:
+            if k in {"parallel"}:
+                kwargs[k] = False
+            elif k in {"max_bond_dim"}:
+                kwargs[k] = 64
+            elif k in {"threshold"}:
+                kwargs[k] = 1e-10
+            else:
+                kwargs[k] = 1e-6
+
+    try:
+        res = yaqs_run(ideal, noisy, **kwargs)
+    except TypeError:
+        res = yaqs_run(ideal, noisy)
+
+    # normalize return
+    if isinstance(res, bool):
+        return res
+    if isinstance(res, dict):
+        for key in ["equivalent", "is_equivalent", "result"]:
+            if key in res and isinstance(res[key], bool):
+                return res[key]
+    if isinstance(res, tuple) or isinstance(res, list):
+        for x in res:
+            if isinstance(x, bool):
+                return x
+    return None
+
+
+def main():
+    print(">>> sweep_gamma_equicheck_fidelity.py")
+
+    ideal_meas = load_qpy(IDEAL_QPY)
+    ideal = strip_measurements(ideal_meas)
+    n = ideal.num_qubits
+
+    run_id = datetime.now().strftime("%Y%m%d-%H%M%S")
+    out_dir = OUT_BASE / run_id
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Save ideal circuit once
+    save_circuit_png_or_txt(ideal, out_dir, "circuit_ideal_unitary")
+
+    gammas = np.logspace(np.log10(GAMMA_MAX), np.log10(GAMMA_MIN), N_GAMMAS)
+    rows_fid = []
+    rows_bool = []
+
+    # Save only a few representative noisy circuit drawings
+    save_idx = {0, len(gammas)//2, len(gammas)-1}
+
+    for i, g in enumerate(gammas):
+        noisy, st = apply_pauli_jump_after_each_gate(ideal, float(g), SEED)
+        fid = trace_fidelity_unitaries(ideal, noisy)
+
+        eq_bool = None
+        if YAQS_DO_CHECK:
+            eq_bool = yaqs_equivcheck_bool(ideal, noisy)
+
+        rows_fid.append((float(g), fid, st.n_noise_ops))
+        rows_bool.append((float(g), eq_bool))
+
+        if i in save_idx:
+            save_circuit_png_or_txt(noisy, out_dir, f"circuit_noisy_gamma_{g:.2e}")
+
+        print(f"gamma={g:.3e}  fid={fid:.6f}  n_noise={st.n_noise_ops}  yaqs_eq={eq_bool}")
+
+    # Write CSVs
+    with (out_dir / "gamma_fidelity.csv").open("w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(["gamma", "trace_fidelity_absTr_over_2n", "n_noise_ops"])
+        w.writerows(rows_fid)
+
+    with (out_dir / "yaqs_equivcheck_bool.csv").open("w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(["gamma", "yaqs_equivalent_bool_or_None"])
+        w.writerows(rows_bool)
+
+    # Plot
+    gam = np.array([r[0] for r in rows_fid], dtype=float)
+    fid = np.array([r[1] for r in rows_fid], dtype=float)
+
+    plt.figure()
+    plt.plot(gam, fid)
+    plt.xscale("log")
+    plt.ylim(0.0, 1.02)
+    plt.xlabel("gamma (log scale)")
+    plt.ylabel(r"trace fidelity  $|\mathrm{Tr}(G G'^\dagger)|/2^n$")
+    plt.title(f"TwoLocal n={n}, seed={SEED}")
+    plt.grid(True, which="both", linestyle="--", linewidth=0.5)
+    plt.tight_layout()
+    plt.savefig(out_dir / "fidelity_vs_gamma.png", dpi=200)
+    plt.close()
+
+    # Report which gammas are False (if YAQS returned bools)
+    false_gammas = [g for g, b in rows_bool if b is False]
+    (out_dir / "yaqs_false_gammas.txt").write_text(
+        "\n".join([f"{x:.8e}" for x in false_gammas]) if false_gammas else "No False values (or YAQS returned None).",
+        encoding="utf-8",
+    )
+
+    print("OUTPUT DIR =", out_dir.resolve())
+    print("Saved: fidelity_vs_gamma.png, gamma_fidelity.csv, yaqs_equivcheck_bool.csv")
+
+
+if __name__ == "__main__":
+    main()
+
+
+==============================
+FILE: ./scripts/exp_mc_convergence.py
+==============================
+
+import argparse
+import json
+from datetime import datetime
+from pathlib import Path
+
+import numpy as np
+import matplotlib.pyplot as plt
+from qiskit import qpy
+
+from qem_yrw_project.noise.pauli_jump import apply_pauli_jump_after_each_gate
+
+def _count_sites(circ):
+    n = 0
+    for inst, qargs, _ in circ.data:
+        name = inst.name.lower()
+        if name in ("barrier", "measure", "reset"):
+            continue
+        n += len(qargs)
+    return n
+
+def _parse_gamma_list(s):
+    xs = []
+    for p in s.split(","):
+        p = p.strip()
+        if p:
+            xs.append(float(p))
+    return xs
+
+def _batch_sizes(tmax):
+    a = list(range(10, min(110, tmax + 1), 10))
+    b = []
+    for k in (200, 300, 500, 800, 1000, 2000, 5000, 10000):
+        if k <= tmax and k not in a:
+            b.append(k)
+    c = [tmax] if tmax not in a and tmax not in b else []
+    return a + b + c
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--tmax", type=int, default=10000)
+    ap.add_argument("--gamma-list", type=str, default="1e-3,1e-2,1e-1")
+    ap.add_argument("--n-batches", type=int, default=50)
+    ap.add_argument("--shots", type=int, default=200)
+    ap.add_argument("--seed", type=int, default=0)
+    args = ap.parse_args()
+
+    root = Path(__file__).resolve().parents[1]
+    qpy_path = root / "outputs" / "ideal" / "twolocal_n6_seed0" / "circuit_ideal.qpy"
+    if not qpy_path.exists():
+        raise FileNotFoundError(f"Missing ideal QPY: {qpy_path}. Run make_ideal_twolocal_n6.py first.")
+
+    with open(qpy_path, "rb") as f:
+        ideal = qpy.load(f)[0]
+
+    n = ideal.num_qubits
+    d = 2 ** n
+    n_sites = _count_sites(ideal)
+    gammas = _parse_gamma_list(args.gamma_list)
+    sizes = _batch_sizes(args.tmax)
+
+    ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+    outdir = root / "outputs" / "experiments" / f"mc_convergence_n{n}_seed{args.seed}" / ts
+    outdir.mkdir(parents=True, exist_ok=True)
+
+    results = {"n": n, "d": d, "n_sites": n_sites, "tmax": args.tmax, "n_batches": args.n_batches, "seed": args.seed, "gammas": gammas, "sizes": sizes, "curves": {}}
+
+    plt.figure()
+
+    for gi, g in enumerate(gammas):
+        vals = np.zeros(args.tmax, dtype=float)
+        for t in range(args.tmax):
+            shot_seed = args.seed * 1000003 + gi * 104729 + t
+            _, st = apply_pauli_jump_after_each_gate(ideal, float(g), seed=int(shot_seed), include_measurements=False)
+            vals[t] = 1.0 if st.n_noise_ops == 0 else (1.0 / (d + 1.0))
+        ref = float(np.mean(vals))
+
+        mean_err = []
+        std_err = []
+        rng = np.random.default_rng(args.seed + gi * 99991)
+
+        for k in sizes:
+            errs = []
+            for _ in range(args.n_batches):
+                idx = rng.choice(args.tmax, size=int(k), replace=False)
+                m = float(np.mean(vals[idx]))
+                errs.append(abs(m - ref))
+            mean_err.append(float(np.mean(errs)))
+            std_err.append(float(np.std(errs)))
+
+        results["curves"][str(g)] = {"ref": ref, "mean_abs_err": mean_err, "std_abs_err": std_err}
+        plt.loglog(sizes, mean_err)
+
+        print(f"gamma={g:.3e} ref={ref:.6f} done", flush=True)
+
+    with open(outdir / "results.json", "w") as f:
+        json.dump(results, f, indent=2)
+
+    plt.xlabel("num_trajectories")
+    plt.ylabel("mean |batch_mean - ref_mean|")
+    plt.title(f"MC convergence (proxy fidelity), n={n}, sites={n_sites}, tmax={args.tmax}")
+    plt.tight_layout()
+    plt.savefig(outdir / "mc_convergence.png", dpi=200)
+    plt.close()
+
+    print(f"WROTE: {outdir}", flush=True)
+    print(f"FIG : {outdir/'mc_convergence.png'}", flush=True)
+
+if __name__ == "__main__":
+    main()
+
+
+==============================
+FILE: ./scripts/run_singletraj_pauli_jump_gamma1e-2_strongsim.py
+==============================
+
+from __future__ import annotations
+
+from pathlib import Path
+from datetime import datetime
+import numpy as np
+from qiskit import qpy
+
+from mqt.yaqs import simulator
+from mqt.yaqs.core.data_structures.networks import MPS
+from mqt.yaqs.core.data_structures.simulation_parameters import Observable, StrongSimParams
+from mqt.yaqs.core.libraries.gate_library import Z
+
+from qem_yrw_project.noise.pauli_jump import apply_pauli_jump_after_each_gate
+
+
+GAMMA = 1e-2
+SEED_START = 0
+SEED_TRIES = 500
+
+IDEAL_QPY = Path("outputs/ideal/twolocal_n6_seed0/circuit_ideal.qpy")
+OUT_BASE = Path("outputs/noisy") / f"pauli_jump_gamma{GAMMA:.0e}" / "twolocal_n6_seed0"
+
+
+def load_qpy(path: Path):
+    if not path.exists():
+        raise FileNotFoundError(f"Missing: {path}")
+    with path.open("rb") as f:
+        return qpy.load(f)[0]
+
+
+def save_circuit_png_or_txt(circ, out_dir: Path, stem: str):
+    try:
+        fig = circ.draw(output="mpl", fold=120)
+        fig.savefig(out_dir / f"{stem}.png", dpi=200, bbox_inches="tight")
+    except Exception as e:
+        (out_dir / f"{stem}.txt").write_text(str(circ.draw(output="text")), encoding="utf-8")
+        (out_dir / f"{stem}.draw_error.txt").write_text(str(e), encoding="utf-8")
+
+
+def strongsim_all_Z(circ, n: int) -> np.ndarray:
+    state = MPS(n, state="zeros")
+    sim_params = StrongSimParams(
+        observables=[Observable(Z(), site) for site in range(n)],
+        num_traj=1,
+        max_bond_dim=64,
+        threshold=1e-10,
+    )
+    simulator.run(state, circ, sim_params, noise_model=None, parallel=False)
+    return np.array([obs.results[0] for obs in sim_params.observables], dtype=float)
+
+
+def main():
+    print(">>> run_singletraj_pauli_jump_gamma1e-2_strongsim.py")
+
+    ideal_meas = load_qpy(IDEAL_QPY)
+    ideal = ideal_meas.remove_final_measurements(inplace=False)
+    n = ideal.num_qubits
+
+    OUT_BASE.mkdir(parents=True, exist_ok=True)
+
+    noisy = None
+    stats = None
+    seed_used = None
+
+    for s in range(SEED_START, SEED_START + SEED_TRIES):
+        cand, st = apply_pauli_jump_after_each_gate(ideal, GAMMA, s, include_measurements=False)
+        if st.n_noise_ops > 0:
+            noisy, stats, seed_used = cand, st, s
+            break
+
+    if noisy is None:
+        raise RuntimeError("No noise inserted after many seeds (unexpected).")
+
+    run_id = datetime.now().strftime("%Y%m%d-%H%M%S")
+    out_dir = OUT_BASE / f"seed_{seed_used}" / run_id
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Save circuits
+    with (out_dir / "circuit_ideal_unitary.qpy").open("wb") as f:
+        qpy.dump(ideal, f)
+    with (out_dir / "circuit_noisy_unitary.qpy").open("wb") as f:
+        qpy.dump(noisy, f)
+
+    # Save drawings
+    save_circuit_png_or_txt(ideal, out_dir, "circuit_ideal_unitary")
+    save_circuit_png_or_txt(noisy, out_dir, "circuit_noisy_unitary")
+
+    # StrongSim compare
+    z_ideal = strongsim_all_Z(ideal, n)
+    z_noisy = strongsim_all_Z(noisy, n)
+    diff = np.abs(z_noisy - z_ideal)
+
+    np.savetxt(out_dir / "z_ideal.txt", z_ideal)
+    np.savetxt(out_dir / "z_noisy.txt", z_noisy)
+    np.savetxt(out_dir / "z_absdiff.txt", diff)
+
+    (out_dir / "meta.txt").write_text(
+        "tag=PAULI_JUMP_STRONGSIM_SINGLETRAJ\n"
+        f"gamma={GAMMA}\n"
+        f"seed_used={seed_used}\n"
+        f"n_gates_seen={stats.n_gates_seen}\n"
+        f"n_noise_ops={stats.n_noise_ops}\n",
+        encoding="utf-8",
+    )
+
+    print("OUTPUT DIR =", out_dir.resolve())
+
+
+if __name__ == "__main__":
+    main()
+
+
+
+==============================
+FILE: ./scripts/sweep_angle_shift_state_fidelity_log.py
+==============================
+
+import argparse
+import json
+import os
+from datetime import datetime
+
+import numpy as np
+import matplotlib.pyplot as plt
+from qiskit.quantum_info import Statevector
+
+from qem_yrw_project.circuits.twolocal import build_twolocal
+from qem_yrw_project.noise.pauli_jump import apply_pauli_jump_after_each_gate
+
+
+def _timestamp():
+    return datetime.now().strftime("%Y%m%d-%H%M%S")
+
+
+def _ensure_dir(p):
+    os.makedirs(p, exist_ok=True)
+    return p
+
+
+def circuit_no_measurements(circ):
+    from qiskit import QuantumCircuit
+
+    out = QuantumCircuit(circ.num_qubits)
+    qmap = {qb: i for i, qb in enumerate(circ.qubits)}
+    for ci in circ.data:
+        op = ci.operation
+        if op.name == "measure":
+            continue
+        qargs = [out.qubits[qmap[q]] for q in ci.qubits]
+        out.append(op, qargs, [])
+    return out
+
+
+def shift_all_rotation_params(circ, delta: float):
+    from qiskit import QuantumCircuit
+
+    out = QuantumCircuit(circ.num_qubits)
+    qmap = {qb: i for i, qb in enumerate(circ.qubits)}
+
+    for ci in circ.data:
+        op = ci.operation
+        qargs = [out.qubits[qmap[q]] for q in ci.qubits]
+
+        if hasattr(op, "params") and len(op.params) > 0:
+            op2 = op.copy()
+            new_params = []
+            for p in op2.params:
+                try:
+                    new_params.append(float(p) + float(delta))
+                except Exception:
+                    new_params.append(p)
+            op2.params = new_params
+            out.append(op2, qargs, [])
+        else:
+            out.append(op, qargs, [])
+    return out
+
+
+def state_fidelity(psi_ref: Statevector, circ) -> float:
+    psi = Statevector.from_instruction(circ)
+    ov = np.vdot(psi_ref.data, psi.data)
+    return float(np.abs(ov) ** 2)
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--n", type=int, default=6)
+    ap.add_argument("--reps", type=int, default=3)
+    ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--gamma", type=float, default=1e-2)
+    ap.add_argument("--delta-min", type=float, default=1e-6)
+    ap.add_argument("--delta-max", type=float, default=2 * np.pi)
+    ap.add_argument("--num", type=int, default=120)
+    ap.add_argument("--shots", type=int, default=200)
+    ap.add_argument("--out-root", type=str, default="outputs/teacher_angle_shift")
+    args = ap.parse_args()
+
+    deltas_pos = np.logspace(np.log10(args.delta_min), np.log10(args.delta_max), args.num)
+    deltas = np.concatenate(([0.0], deltas_pos))
+
+    out_dir = _ensure_dir(os.path.join(args.out_root, f"twolocal_n{args.n}_seed{args.seed}", _timestamp()))
+    print("OUTPUT DIR =", os.path.abspath(out_dir), flush=True)
+
+    ideal = build_twolocal(n=args.n, reps=args.reps, seed=args.seed, add_measurements=True)
+    ideal_u = circuit_no_measurements(ideal)
+    psi_ref = Statevector.from_instruction(ideal_u)
+
+    means = np.empty(len(deltas), dtype=float)
+    stds = np.empty(len(deltas), dtype=float)
+
+    for i, d in enumerate(deltas):
+        shifted = shift_all_rotation_params(ideal_u, float(d))
+        vals = np.empty(args.shots, dtype=float)
+        for s in range(args.shots):
+            noisy, _stats = apply_pauli_jump_after_each_gate(shifted, args.gamma, seed=args.seed * 10_000_000 + i * 1_000 + s)
+            vals[s] = state_fidelity(psi_ref, noisy)
+        means[i] = float(vals.mean())
+        stds[i] = float(vals.std(ddof=1))
+        if (i + 1) % max(1, len(deltas) // 20) == 0:
+            print(f"delta sweep {i+1}/{len(deltas)}", flush=True)
+
+    best_i = int(np.argmax(means))
+    best_delta = float(deltas[best_i])
+    best_mean = float(means[best_i])
+
+    fig = plt.figure()
+    plt.xscale("log")
+    plt.xlabel("delta (log scale)")
+    plt.ylabel("mean state fidelity")
+    plt.title(f"Angle-shift sweep (log delta), gamma={args.gamma:g}, shots={args.shots}, n={args.n}")
+    plt.plot(deltas_pos, means[1:])
+    fig.savefig(os.path.join(out_dir, "angle_shift_fidelity_logx.png"), dpi=200, bbox_inches="tight")
+    plt.close(fig)
+
+    fig = plt.figure()
+    plt.xlabel("delta")
+    plt.ylabel("mean state fidelity")
+    plt.title(f"Angle-shift sweep (linear), gamma={args.gamma:g}, shots={args.shots}, n={args.n}")
+    plt.plot(deltas, means)
+    fig.savefig(os.path.join(out_dir, "angle_shift_fidelity_linear.png"), dpi=200, bbox_inches="tight")
+    plt.close(fig)
+
+    with open(os.path.join(out_dir, "results.json"), "w") as f:
+        json.dump(
+            {
+                "meta": vars(args),
+                "deltas": [float(x) for x in deltas],
+                "mean_fidelity": [float(x) for x in means],
+                "std_fidelity": [float(x) for x in stds],
+                "best_delta": best_delta,
+                "best_mean": best_mean,
+            },
+            f,
+            indent=2,
+        )
+
+    print("BEST delta =", best_delta, "mean fidelity =", best_mean, flush=True)
+    print("WROTE:", os.path.abspath(out_dir), flush=True)
+
+
+if __name__ == "__main__":
+    main()
+
+
+==============================
+FILE: ./scripts/exp_smoke_backend.py
+==============================
+
+import argparse
+from qiskit import QuantumCircuit
+from qiskit.quantum_info import Pauli
+
+from qem_yrw_project.adapters.factory import make_backend
+
+def obs_z0(statevector):
+    # <Z0> on single-qubit state
+    return statevector.expectation_value(Pauli("Z")).real
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--backend", default="qiskit")
+    args = ap.parse_args()
+
+    backend = make_backend(args.backend)
+
+    qc = QuantumCircuit(1)
+    qc.h(0)  # |+> => <Z>=0
+
+    val, meta = backend.ideal_expectation(qc, obs_z0)
+    print("backend:", meta.backend, " <Z> =", val)
+
+if __name__ == "__main__":
+    main()
+
+
+==============================
+FILE: ./scripts/yaqs_equivcheck_latest.py
+==============================
+
+
+from __future__ import annotations
+
+from pathlib import Path
+from datetime import datetime
+import inspect
+from qiskit import qpy
+
+from mqt.yaqs.digital.equivalence_checker import run as equiv_run
+from qem_yrw_project.noise.pauli_jump import apply_pauli_jump_after_each_gate
+
+
+GAMMA = 1e-2
+SEED_START = 0
+SEED_TRIES = 500
+
+IDEAL_QPY = Path("outputs/ideal/twolocal_n6_seed0/circuit_ideal.qpy")
+OUT_BASE = Path("outputs/equivcheck") / f"pauli_jump_gamma{GAMMA:.0e}" / "twolocal_n6_seed0"
+
+
+def load_qpy(path: Path):
+    if not path.exists():
+        raise FileNotFoundError(f"Missing: {path}")
+    with path.open("rb") as f:
+        return qpy.load(f)[0]
+
+
+def save_circuit_png_or_txt(circ, out_dir: Path, stem: str):
+    try:
+        fig = circ.draw(output="mpl", fold=120)
+        fig.savefig(out_dir / f"{stem}.png", dpi=200, bbox_inches="tight")
+    except Exception as e:
+        (out_dir / f"{stem}.txt").write_text(str(circ.draw(output="text")), encoding="utf-8")
+        (out_dir / f"{stem}.draw_error.txt").write_text(str(e), encoding="utf-8")
+
+
+def main():
+    print(">>> yaqs_equivcheck_latest.py")
+
+    ideal_meas = load_qpy(IDEAL_QPY)
+    ideal = ideal_meas.remove_final_measurements(inplace=False)
+
+    noisy = None
+    stats = None
+    seed_used = None
+
+    for s in range(SEED_START, SEED_START + SEED_TRIES):
+        cand, st = apply_pauli_jump_after_each_gate(ideal, GAMMA, s, include_measurements=False)
+        if st.n_noise_ops > 0:
+            noisy, stats, seed_used = cand, st, s
+            break
+    if noisy is None:
+        raise RuntimeError("No noise inserted after many seeds (unexpected).")
+
+    run_id = datetime.now().strftime("%Y%m%d-%H%M%S")
+    out_dir = OUT_BASE / f"seed_{seed_used}" / run_id
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    save_circuit_png_or_txt(ideal, out_dir, "circuit_ideal_unitary")
+    save_circuit_png_or_txt(noisy, out_dir, "circuit_noisy_unitary")
+
+    sig = str(inspect.signature(equiv_run))
+    result = None
+    err = None
+
+    try:
+        # most common usage
+        result = equiv_run(ideal, noisy)
+    except Exception as e:
+        err = f"{type(e).__name__}: {e}"
+
+    report = []
+    report.append("tag=YAQS_EQUIVCHECK\n")
+    report.append(f"gamma={GAMMA}\nseed_used={seed_used}\n")
+    report.append(f"n_gates_seen={stats.n_gates_seen}\n")
+    report.append(f"n_noise_ops={stats.n_noise_ops}\n")
+    report.append(f"equiv_run_signature={sig}\n")
+    report.append(f"result={result}\n")
+    if err is not None:
+        report.append("\nERROR:\n" + err + "\n")
+
+    (out_dir / "yaqs_equivcheck_report.txt").write_text("".join(report), encoding="utf-8")
+    print("OUTPUT DIR =", out_dir.resolve())
+
+
+if __name__ == "__main__":
+    main()
+
+
+==============================
+FILE: ./scripts/exp_error_vs_gamma_log.py
+==============================
+
+import argparse
+import json
+from datetime import datetime
+from pathlib import Path
+
+import numpy as np
+import matplotlib.pyplot as plt
+from qiskit import qpy
+
+from qem_yrw_project.noise.pauli_jump import apply_pauli_jump_after_each_gate
+
+def _count_sites(circ):
+    n = 0
+    for inst, qargs, _ in circ.data:
+        name = inst.name.lower()
+        if name in ("barrier", "measure", "reset"):
+            continue
+        n += len(qargs)
+    return n
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--gamma-min-exp", type=int, default=-3)
+    ap.add_argument("--gamma-max-exp", type=int, default=-1)
+    ap.add_argument("--num", type=int, default=100)
+    ap.add_argument("--shots", type=int, default=200)
+    ap.add_argument("--seed", type=int, default=0)
+    args = ap.parse_args()
+
+    root = Path(__file__).resolve().parents[1]
+    qpy_path = root / "outputs" / "ideal" / "twolocal_n6_seed0" / "circuit_ideal.qpy"
+    if not qpy_path.exists():
+        raise FileNotFoundError(f"Missing ideal QPY: {qpy_path}. Run make_ideal_twolocal_n6.py first.")
+
+    with open(qpy_path, "rb") as f:
+        ideal = qpy.load(f)[0]
+
+    n = ideal.num_qubits
+    d = 2 ** n
+    n_sites = _count_sites(ideal)
+
+    gammas = np.logspace(args.gamma_min_exp, args.gamma_max_exp, args.num)
+    meanF = np.zeros_like(gammas, dtype=float)
+    meanErr = np.zeros_like(gammas, dtype=float)
+
+    for i, g in enumerate(gammas):
+        vals = []
+        for s in range(args.shots):
+            shot_seed = args.seed * 1000003 + i * 7919 + s
+            _, st = apply_pauli_jump_after_each_gate(ideal, float(g), seed=int(shot_seed), include_measurements=False)
+            v = 1.0 if st.n_noise_ops == 0 else (1.0 / (d + 1.0))
+            vals.append(v)
+        m = float(np.mean(vals))
+        meanF[i] = m
+        meanErr[i] = 1.0 - m
+
+        if (i + 1) % max(1, args.num // 10) == 0:
+            print(f"{i+1}/{args.num} gamma={g:.3e} meanF={m:.6f} err={1.0-m:.6f}", flush=True)
+
+    p0 = (1.0 - gammas) ** n_sites
+    theoryF = (1.0 / (d + 1.0)) + (d / (d + 1.0)) * p0
+    theoryErr = 1.0 - theoryF
+
+    ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+    outdir = root / "outputs" / "experiments" / f"error_vs_gamma_log_n{n}_seed{args.seed}" / ts
+    outdir.mkdir(parents=True, exist_ok=True)
+
+    with open(outdir / "results.json", "w") as f:
+        json.dump(
+            {
+                "n": n,
+                "d": d,
+                "n_sites": n_sites,
+                "gamma_min_exp": args.gamma_min_exp,
+                "gamma_max_exp": args.gamma_max_exp,
+                "num": args.num,
+                "shots": args.shots,
+                "seed": args.seed,
+                "gammas": gammas.tolist(),
+                "mean_fidelity": meanF.tolist(),
+                "mean_error": meanErr.tolist(),
+                "theory_error": theoryErr.tolist(),
+            },
+            f,
+            indent=2,
+        )
+
+    plt.figure()
+    plt.loglog(gammas, meanErr)
+    plt.loglog(gammas, theoryErr, linestyle="--")
+    plt.xlabel("gamma")
+    plt.ylabel("error = 1 - fidelity_proxy")
+    plt.title(f"Error vs gamma (log-log), n={n}, sites={n_sites}, shots={args.shots}")
+    plt.tight_layout()
+    plt.savefig(outdir / "error_vs_gamma_loglog.png", dpi=200)
+    plt.close()
+
+    print(f"WROTE: {outdir}", flush=True)
+    print(f"FIG : {outdir/'error_vs_gamma_loglog.png'}", flush=True)
+
+if __name__ == "__main__":
+    main()
+
+
+==============================
+FILE: ./scripts/run_full_pipeline.py
+==============================
+
+import argparse
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+def _run(cmd):
+    s = " ".join(str(x) for x in cmd)
+    print(s, flush=True)
+    subprocess.run([str(x) for x in cmd], check=True)
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--clean", action="store_true")
+    ap.add_argument("--teacher", action="store_true")
+    ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--shots", type=int, default=200)
+    ap.add_argument("--gamma_min", type=float, default=1e-4)
+    ap.add_argument("--gamma_max", type=float, default=1.0)
+    ap.add_argument("--num", type=int, default=500)
+    ap.add_argument("--smooth_window", type=int, default=31)
+    ap.add_argument("--mode", type=str, default="proxy", choices=["proxy"])
+    ap.add_argument("--tmax", type=int, default=10000)
+    ap.add_argument("--gamma_list", type=str, default="1e-3,1e-2,1e-1")
+    args = ap.parse_args()
+
+    root = Path(__file__).resolve().parents[1]
+    outdir = root / "outputs"
+
+    if args.clean and outdir.exists():
+        shutil.rmtree(outdir)
+    outdir.mkdir(parents=True, exist_ok=True)
+
+    py = sys.executable
+
+    _run([py, "-u", root / "scripts" / "make_ideal_twolocal_n6.py"])
+    _run([py, "-u", root / "scripts" / "run_singletraj_pauli_jump_gamma1e-2_strongsim.py"])
+    _run([py, "-u", root / "scripts" / "yaqs_equivcheck_latest.py"])
+
+    _run([
+        py, "-u", root / "scripts" / "sweep_gamma_trace_fidelity_dense.py",
+        "--gamma-min", str(args.gamma_min),
+        "--gamma-max", str(args.gamma_max),
+        "--num", str(args.num),
+        "--shots", str(args.shots),
+        "--seed", str(args.seed),
+        "--smooth-window", str(args.smooth_window),
+        "--mode", args.mode
+    ])
+
+    if args.teacher:
+        _run([
+            py, "-u", root / "scripts" / "exp_error_vs_gamma_log.py",
+            "--shots", str(args.shots),
+            "--seed", str(args.seed)
+        ])
+        _run([
+            py, "-u", root / "scripts" / "sweep_angle_shift_state_fidelity_log.py",
+            "--gamma", "1e-2",
+            "--delta-min", "1e-6",
+            "--delta-max", "6.283185307179586",
+            "--num", "120",
+            "--shots", str(args.shots),
+            "--seed", str(args.seed)
+        ])
+        _run([
+            py, "-u", root / "scripts" / "exp_mc_convergence.py",
+            "--tmax", str(args.tmax),
+            "--gamma-list", args.gamma_list,
+            "--n-batches", "50",
+            "--shots", str(args.shots),
+            "--seed", str(args.seed)
+        ])
+
+    print("DONE. Check outputs/.", flush=True)
+
+if __name__ == "__main__":
+    main()
+
+
+==============================
+FILE: ./scripts/make_ideal_twolocal_n6.py
+==============================
+
+from __future__ import annotations
+
+from pathlib import Path
+
+from qiskit import qpy
+
+from qem_yrw_project.circuits.twolocal import build_twolocal
+
+
+def main():
+    print(">>> building IDEAL TwoLocal circuit (n=6)")
+
+    # --- config (ideal reference) ---
+    num_qubits = 6
+    depth = num_qubits
+    seed = 0
+    add_measurements = True
+
+    # --- fixed output location for ideal reference ---
+    out_dir = Path("outputs/ideal") / f"twolocal_n{num_qubits}_seed{seed}"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # --- build ideal circuit ---
+    circuit_ideal = build_twolocal(
+        num_qubits=num_qubits,
+        depth=depth,
+        seed=seed,
+        add_measurements=add_measurements,
+    )
+
+    # --- save circuit (most robust: QPY) ---
+    qpy_path = out_dir / "circuit_ideal.qpy"
+    with qpy_path.open("wb") as f:
+        qpy.dump(circuit_ideal, f)
+
+    # --- try save qasm3 (optional, depends on qiskit version) ---
+    try:
+        from qiskit.qasm3 import dumps as qasm3_dumps  # type: ignore
+
+        (out_dir / "circuit_ideal.qasm3").write_text(qasm3_dumps(circuit_ideal), encoding="utf-8")
+        print("Saved: circuit_ideal.qasm3")
+    except Exception as e:
+        print(f"Skip qasm3 export: {e}")
+
+    # --- save figure (mpl), fallback to text ---
+    try:
+        fig = circuit_ideal.draw(output="mpl", fold=120)
+        fig.savefig(out_dir / "circuit_ideal.png", dpi=200, bbox_inches="tight")
+        print("Saved: circuit_ideal.png")
+    except Exception as e:
+        (out_dir / "circuit_ideal.txt").write_text(str(circuit_ideal.draw(output="text")), encoding="utf-8")
+        print(f"Skip mpl drawing, saved circuit_ideal.txt instead: {e}")
+
+    # --- meta info ---
+    (out_dir / "meta.txt").write_text(
+        "tag=IDEAL_REFERENCE\n"
+        f"num_qubits={num_qubits}\n"
+        f"depth={depth}\n"
+        f"seed={seed}\n"
+        f"add_measurements={add_measurements}\n",
+        encoding="utf-8",
+    )
+
+    print("Saved ideal reference to:", out_dir.resolve())
+    print("QPY:", qpy_path.resolve())
+
+
+if __name__ == "__main__":
+    main()
+
+
+==============================
+FILE: ./outputs/experiments/error_vs_gamma_log_n6_seed0/20251218-015139/results.json
+==============================
+
+{
+  "n": 6,
+  "d": 64,
+  "n_sites": 102,
+  "gamma_min_exp": -3,
+  "gamma_max_exp": -1,
+  "num": 100,
+  "shots": 200,
+  "seed": 0,
+  "gammas": [
+    0.001,
+    0.001047615752789665,
+    0.0010974987654930556,
+    0.0011497569953977356,
+    0.0012045035402587824,
+    0.0012618568830660211,
+    0.0013219411484660286,
+    0.0013848863713938732,
+    0.0014508287784959402,
+    0.0015199110829529332,
+    0.0015922827933410922,
+    0.0016681005372000592,
+    0.001747528400007683,
+    0.0018307382802953678,
+    0.0019179102616724887,
+    0.002009233002565048,
+    0.00210490414451202,
+    0.0022051307399030455,
+    0.0023101297000831605,
+    0.0024201282647943836,
+    0.0025353644939701114,
+    0.0026560877829466868,
+    0.0027825594022071257,
+    0.002915053062825176,
+    0.0030538555088334154,
+    0.0031992671377973846,
+    0.003351602650938841,
+    0.003511191734215131,
+    0.0036783797718286343,
+    0.0038535285937105275,
+    0.004037017258596553,
+    0.0042292428743894986,
+    0.004430621457583882,
+    0.004641588833612782,
+    0.004862601580065354,
+    0.0050941380148163806,
+    0.005336699231206312,
+    0.005590810182512223,
+    0.005857020818056668,
+    0.006135907273413176,
+    0.006428073117284319,
+    0.006734150657750821,
+    0.007054802310718645,
+    0.007390722033525776,
+    0.007742636826811269,
+    0.008111308307896872,
+    0.008497534359086447,
+    0.008902150854450393,
+    0.0093260334688322,
+    0.009770099572992257,
+    0.010235310218990263,
+    0.010722672220103237,
+    0.011233240329780276,
+    0.011768119524349984,
+    0.012328467394420665,
+    0.01291549665014884,
+    0.013530477745798075,
+    0.014174741629268055,
+    0.01484968262254465,
+    0.015556761439304723,
+    0.016297508346206444,
+    0.017073526474706915,
+    0.01788649529057435,
+    0.018738174228603847,
+    0.019630406500402715,
+    0.020565123083486514,
+    0.021544346900318846,
+    0.022570197196339202,
+    0.023644894126454083,
+    0.024770763559917114,
+    0.025950242113997372,
+    0.027185882427329416,
+    0.02848035868435802,
+    0.029836472402833405,
+    0.03125715849688237,
+    0.0327454916287773,
+    0.03430469286314919,
+    0.03593813663804628,
+    0.037649358067924694,
+    0.03944206059437656,
+    0.04132012400115339,
+    0.04328761281083059,
+    0.04534878508128584,
+    0.04750810162102798,
+    0.049770235643321115,
+    0.05214008287999687,
+    0.05462277217684343,
+    0.0572236765935022,
+    0.05994842503189412,
+    0.06280291441834256,
+    0.06579332246575682,
+    0.06892612104349699,
+    0.07220809018385467,
+    0.07564633275546291,
+    0.07924828983539177,
+    0.08302175681319748,
+    0.08697490026177834,
+    0.09111627561154896,
+    0.09545484566618342,
+    0.1
+  ],
+  "mean_fidelity": [
+    0.9064615384615385,
+    0.9015384615384616,
+    0.9163076923076923,
+    0.8719999999999999,
+    0.8818461538461538,
+    0.867076923076923,
+    0.8572307692307691,
+    0.8818461538461538,
+    0.8227692307692308,
+    0.8867692307692308,
+    0.9015384615384616,
+    0.7784615384615384,
+    0.8375384615384616,
+    0.8424615384615385,
+    0.8326153846153846,
+    0.8030769230769232,
+    0.8473846153846154,
+    0.7587692307692308,
+    0.8080000000000002,
+    0.7784615384615384,
+    0.8080000000000002,
+    0.8129230769230769,
+    0.7538461538461538,
+    0.7538461538461538,
+    0.7587692307692308,
+    0.6947692307692307,
+    0.7292307692307692,
+    0.6849230769230769,
+    0.7489230769230769,
+    0.6750769230769231,
+    0.6603076923076924,
+    0.6849230769230769,
+    0.6504615384615384,
+    0.6553846153846155,
+    0.6553846153846153,
+    0.5913846153846154,
+    0.5372307692307693,
+    0.5224615384615384,
+    0.556923076923077,
+    0.5618461538461539,
+    0.5766153846153845,
+    0.5126153846153846,
+    0.5224615384615384,
+    0.5224615384615384,
+    0.49292307692307685,
+    0.419076923076923,
+    0.42399999999999993,
+    0.43384615384615377,
+    0.4043076923076923,
+    0.3304615384615384,
+    0.3846153846153845,
+    0.34030769230769226,
+    0.31569230769230766,
+    0.33538461538461534,
+    0.3846153846153845,
+    0.27138461538461534,
+    0.22215384615384612,
+    0.20738461538461536,
+    0.2566153846153846,
+    0.19753846153846152,
+    0.17292307692307687,
+    0.21723076923076917,
+    0.10892307692307689,
+    0.14830769230769225,
+    0.20246153846153842,
+    0.10892307692307693,
+    0.10892307692307689,
+    0.09907692307692306,
+    0.09415384615384614,
+    0.07446153846153844,
+    0.07938461538461537,
+    0.10399999999999998,
+    0.05476923076923075,
+    0.03507692307692307,
+    0.07446153846153844,
+    0.035076923076923075,
+    0.04984615384615383,
+    0.04984615384615383,
+    0.030153846153846153,
+    0.030153846153846153,
+    0.03507692307692307,
+    0.020307692307692308,
+    0.039999999999999994,
+    0.020307692307692308,
+    0.015384615384615385,
+    0.02523076923076923,
+    0.020307692307692308,
+    0.020307692307692308,
+    0.02523076923076923,
+    0.02523076923076923,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385
+  ],
+  "mean_error": [
+    0.09353846153846146,
+    0.09846153846153838,
+    0.08369230769230773,
+    0.1280000000000001,
+    0.11815384615384616,
+    0.13292307692307703,
+    0.14276923076923087,
+    0.11815384615384616,
+    0.1772307692307692,
+    0.11323076923076925,
+    0.09846153846153838,
+    0.22153846153846157,
+    0.16246153846153844,
+    0.15753846153846152,
+    0.16738461538461535,
+    0.19692307692307676,
+    0.1526153846153846,
+    0.24123076923076925,
+    0.19199999999999984,
+    0.22153846153846157,
+    0.19199999999999984,
+    0.18707692307692314,
+    0.24615384615384617,
+    0.24615384615384617,
+    0.24123076923076925,
+    0.3052307692307693,
+    0.27076923076923076,
+    0.31507692307692314,
+    0.2510769230769231,
+    0.32492307692307687,
+    0.3396923076923076,
+    0.31507692307692314,
+    0.3495384615384616,
+    0.34461538461538455,
+    0.34461538461538466,
+    0.4086153846153846,
+    0.4627692307692307,
+    0.4775384615384616,
+    0.44307692307692303,
+    0.4381538461538461,
+    0.42338461538461547,
+    0.4873846153846154,
+    0.4775384615384616,
+    0.4775384615384616,
+    0.5070769230769232,
+    0.580923076923077,
+    0.5760000000000001,
+    0.5661538461538462,
+    0.5956923076923077,
+    0.6695384615384616,
+    0.6153846153846154,
+    0.6596923076923078,
+    0.6843076923076923,
+    0.6646153846153846,
+    0.6153846153846154,
+    0.7286153846153847,
+    0.7778461538461539,
+    0.7926153846153846,
+    0.7433846153846154,
+    0.8024615384615384,
+    0.8270769230769232,
+    0.7827692307692309,
+    0.8910769230769231,
+    0.8516923076923077,
+    0.7975384615384615,
+    0.8910769230769231,
+    0.8910769230769231,
+    0.9009230769230769,
+    0.9058461538461539,
+    0.9255384615384615,
+    0.9206153846153846,
+    0.896,
+    0.9452307692307692,
+    0.9649230769230769,
+    0.9255384615384615,
+    0.9649230769230769,
+    0.9501538461538461,
+    0.9501538461538461,
+    0.9698461538461538,
+    0.9698461538461538,
+    0.9649230769230769,
+    0.9796923076923076,
+    0.96,
+    0.9796923076923076,
+    0.9846153846153847,
+    0.9747692307692307,
+    0.9796923076923076,
+    0.9796923076923076,
+    0.9747692307692307,
+    0.9747692307692307,
+    0.9846153846153847,
+    0.9846153846153847,
+    0.9846153846153847,
+    0.9846153846153847,
+    0.9846153846153847,
+    0.9846153846153847,
+    0.9846153846153847,
+    0.9846153846153847,
+    0.9846153846153847,
+    0.9846153846153847
+  ],
+  "theory_error": [
+    0.09552397035162707,
+    0.09983605035208631,
+    0.10433124286978401,
+    0.1090162229610574,
+    0.11389780172422226,
+    0.11898291753171586,
+    0.1242786257020323,
+    0.12979208647191798,
+    0.1355305511222149,
+    0.14150134610374931,
+    0.14771185500341089,
+    0.15416949818485315,
+    0.160881709933268,
+    0.16785591292964064,
+    0.1750994898777145,
+    0.18261975210534231,
+    0.1904239049633829,
+    0.19851900984796345,
+    0.20691194267826085,
+    0.21560934867063697,
+    0.2246175932627843,
+    0.2339427090583035,
+    0.24359033868340618,
+    0.2535656734746199,
+    0.26387338794886284,
+    0.2745175700465783,
+    0.2855016471856233,
+    0.2968283082178478,
+    0.30849942144373776,
+    0.3205159489130034,
+    0.3328778573211717,
+    0.3455840259050482,
+    0.3586321518428133,
+    0.3720186537790868,
+    0.3857385742196704,
+    0.3997854816764397,
+    0.4141513735879965,
+    0.42882658119591754,
+    0.44379967771797557,
+    0.45905739132680323,
+    0.47458452461211387,
+    0.49036388237393047,
+    0.5063762097587372,
+    0.5226001429056784,
+    0.5390121744095806,
+    0.5555866360254129,
+    0.5722957011270655,
+    0.5891094094833695,
+    0.6059957169173964,
+    0.6229205723607344,
+    0.6398480246928433,
+    0.6567403615558649,
+    0.6735582820475428,
+    0.6902611048092506,
+    0.7068070125344754,
+    0.7231533333191739,
+    0.7392568585552646,
+    0.7550741962325217,
+    0.7705621575663808,
+    0.7856781738196423,
+    0.8003807390510091,
+    0.8146298733259545,
+    0.8283875996967257,
+    0.8416184270375688,
+    0.8542898296556832,
+    0.8663727135428976,
+    0.877841858249078,
+    0.888676322711635,
+    0.8988598030346573,
+    0.9083809302427036,
+    0.9172334964995899,
+    0.9254165992324374,
+    0.9329346940706994,
+    0.9397975495124044,
+    0.9460200987517192,
+    0.9516221870978779,
+    0.956628216804759,
+    0.9610666947953864,
+    0.9649696925530542,
+    0.9683722311755767,
+    0.9713116080425819,
+    0.9738266845064497,
+    0.9759571562666487,
+    0.9777428294259409,
+    0.9792229254954166,
+    0.9804354377117435,
+    0.981416558927162,
+    0.9822001980901416,
+    0.9828175981038151,
+    0.9832970628706272,
+    0.9836637959210418,
+    0.9839398475504383,
+    0.9841441622418269,
+    0.9842927137076587,
+    0.984398711462751,
+    0.9844728606737909,
+    0.984523656234338,
+    0.9845576925725359,
+    0.9845799724678359,
+    0.9845942008781795
+  ]
+}
+
+==============================
+FILE: ./outputs/sweeps/gamma_1e-04_to_1e+00_N500_shots200_n6_seed0/20251218-015037/results.json
+==============================
+
+{
+  "n_qubits": 6,
+  "d": 64,
+  "n_sites": 72,
+  "mode": "proxy",
+  "gamma_min": 0.0001,
+  "gamma_max": 1.0,
+  "num": 500,
+  "shots": 200,
+  "seed": 0,
+  "smooth_window": 31,
+  "gammas": [
+    0.0001,
+    0.00010186289902446876,
+    0.00010376050197669118,
+    0.00010569345535579884,
+    0.00010766241770454933,
+    0.00010966805983368685,
+    0.00011171106505048242,
+    0.0001137921293915315,
+    0.00011591196185988857,
+    0.00011807128466661903,
+    0.0001202708334768512,
+    0.0001225113576604119,
+    0.00012479362054713115,
+    0.0001271183996869029,
+    0.0001294864871145905,
+    0.00013189868961986705,
+    0.00013435582902208263,
+    0.00013685874245025192,
+    0.00013940828262825786,
+    0.00014200531816536833,
+    0.0001446507338521647,
+    0.00014734543096198358,
+    0.00015009032755797366,
+    0.00015288635880587311,
+    0.0001557344772926135,
+    0.00015863565335085897,
+    0.00016159087538959193,
+    0.00016460115023085497,
+    0.00016766750345276993,
+    0.00017079097973894268,
+    0.00017397264323438006,
+    0.00017721357790803584,
+    0.0001805148879221108,
+    0.0001838776980082327,
+    0.00018730315385064364,
+    0.0001907924224765265,
+    0.000194346692653602,
+    0.00019796717529513326,
+    0.00020165510387247463,
+    0.00020541173483530642,
+    0.0002092383480396977,
+    0.00021313624718414376,
+    0.0002171067602537265,
+    0.00022115123997254888,
+    0.00022527106426459804,
+    0.0002294676367231936,
+    0.00023374238708918148,
+    0.00023809677173803584,
+    0.0002425322741760353,
+    0.00024705040554568255,
+    0.00025165270514053916,
+    0.0002563407409296515,
+    0.0002611161100917459,
+    0.00026598043955937585,
+    0.0002709353865732052,
+    0.00027598263924661807,
+    0.00028112391714084643,
+    0.00028636097185081157,
+    0.0002916955876018796,
+    0.0002971295818577334,
+    0.0003026648059395692,
+    0.0003083031456568277,
+    0.0003140465219496752,
+    0.00031989689154345377,
+    0.00032585624761532263,
+    0.00033192662047331896,
+    0.00033811007824806853,
+    0.00034440872759738234,
+    0.00035082471442397925,
+    0.0003573602246065788,
+    0.00036401748474461414,
+    0.00037079876291681727,
+    0.00037770636945393647,
+    0.0003847426577258506,
+    0.00039191002494334023,
+    0.00039921091297480534,
+    0.0004066478091781854,
+    0.0004142232472483898,
+    0.0004219398080805024,
+    0.00042980012064907985,
+    0.00043780686290381665,
+    0.00044596276268190954,
+    0.0004542705986374043,
+    0.0004627332011878693,
+    0.0004713534534786907,
+    0.000480134292365345,
+    0.000489078709413959,
+    0.000498189751920516,
+    0.0005074705239490466,
+    0.0005169241873891598,
+    0.0005265539630332755,
+    0.000536363131673924,
+    0.0005463550352214876,
+    0.0005565330778427646,
+    0.0005669007271207433,
+    0.000577461515235982,
+    0.0005882190401699955,
+    0.0005991769669310619,
+    0.0006103390288028621,
+    0.0006217090286163827,
+    0.0006332908400455115,
+    0.0006450884089267692,
+    0.000657105754603627,
+    0.000669346971295866,
+    0.0006818162294944479,
+    0.0006945177773823696,
+    0.0007074559422819879,
+    0.0007206351321293053,
+    0.0007340598369757212,
+    0.0007477346305177588,
+    0.0007616641716552892,
+    0.0007758532060787836,
+    0.0007903065678861348,
+    0.0008050291812295981,
+    0.0008200260619934131,
+    0.0008353023195026779,
+    0.0008508631582640582,
+    0.0008667138797389233,
+    0.000882859884149515,
+    0.0008993066723187623,
+    0.0009160598475443709,
+    0.000933125117507825,
+    0.0009505082962189511,
+    0.0009682153059967076,
+    0.0009862521794868784,
+    0.0010046250617173403,
+    0.0010233402121916423,
+    0.001042404007021556,
+    0.0010618229410993846,
+    0.0010816036303107094,
+    0.0011017528137883873,
+    0.0011222773562085072,
+    0.0011431842501291502,
+    0.0011644806183726856,
+    0.0011861737164524792,
+    0.001208270935044776,
+    0.0012307798025066657,
+    0.0012537079874409196,
+    0.0012770633013086446,
+    0.0013008537010905706,
+    0.0013250872919979538,
+    0.0013497723302339417,
+    0.0013749172258064192,
+    0.0014005305453932196,
+    0.001426621015260737,
+    0.0014531975242368955,
+    0.0014802691267395086,
+    0.0015078450458610511,
+    0.001535934676510897,
+    0.0015645475886160959,
+    0.0015936935303817745,
+    0.0016233824316122783,
+    0.0016536244070941804,
+    0.0016844297600423152,
+    0.0017158089856100047,
+    0.0017477727744646808,
+    0.001780332016430114,
+    0.0018134978041964953,
+    0.0018472814370996341,
+    0.0018816944249705557,
+    0.001916748492056815,
+    0.001952455581016861,
+    0.0019888278569888096,
+    0.002025877711735017,
+    0.0020636177678638587,
+    0.002102060883130158,
+    0.0021412201548157293,
+    0.00218110892419152,
+    0.0022217407810628826,
+    0.0022631295683995297,
+    0.002305289387051706,
+    0.0023482346005542763,
+    0.002391979840020237,
+    0.002436540009125466,
+    0.002481930289186253,
+    0.0025281661443315004,
+    0.0025752633267711986,
+    0.002623237882163124,
+    0.0026721061550794324,
+    0.0027218847945751795,
+    0.002772590759860481,
+    0.002824241326078436,
+    0.0028768540901905914,
+    0.0029304469769721444,
+    0.0029850382451187293,
+    0.0030406464934670686,
+    0.0030972906673314067,
+    0.0031549900649580887,
+    0.0032137643441002756,
+    0.0032736335287152475,
+    0.003334618015786363,
+    0.0033967385822722095,
+    0.003460016392185109,
+    0.0035244730038015842,
+    0.0035901303770070683,
+    0.0036570108807774896,
+    0.0037251373008002097,
+    0.0037945328472369384,
+    0.0038652211626312616,
+    0.0039372263299634795,
+    0.004010572880855496,
+    0.004085285803928561,
+    0.004161390553316707,
+    0.004238913057338779,
+    0.004317879727332021,
+    0.004398317466650224,
+    0.00448025367982949,
+    0.0045637162819247585,
+    0.0046487337080202565,
+    0.004735334922917116,
+    0.004823549431001467,
+    0.0049134072862963615,
+    0.0050049391027009536,
+    0.005098176064420425,
+    0.005193149936590212,
+    0.005289893076098151,
+    0.005388438442608223,
+    0.005488819609789672,
+    0.005591070776755293,
+    0.005695226779712819,
+    0.005801323103833378,
+    0.005909395895340965,
+    0.006019481973827274,
+    0.006131618844795769,
+    0.006245844712439618,
+    0.006362198492657482,
+    0.0064807198263119705,
+    0.006601449092734883,
+    0.006724427423484249,
+    0.00684969671635744,
+    0.006977299649665538,
+    0.007107279696773412,
+    0.007239681140910877,
+    0.007374549090259547,
+    0.007511929493320969,
+    0.0076518691545708175,
+    0.007794415750404951,
+    0.007939617845382276,
+    0.008087524908770457,
+    0.008238187331399601,
+    0.008391656442830162,
+    0.008547984528840405,
+    0.008707224849239923,
+    0.008869431656014705,
+    0.009034660211810526,
+    0.00920296680876041,
+    0.009374408787662991,
+    0.009549044557518078,
+    0.009726933615426168,
+    0.009908136566858666,
+    0.010092715146305707,
+    0.010280732238308648,
+    0.010472251898884344,
+    0.01066733937734857,
+    0.010866061138545968,
+    0.011068484885494119,
+    0.011274679582449461,
+    0.01148471547840289,
+    0.01169866413101307,
+    0.011916598430985588,
+    0.012138592626906277,
+    0.01236472235053715,
+    0.012595064642583576,
+    0.012829697978941476,
+    0.013068702297433463,
+    0.013312159025043077,
+    0.013560151105656334,
+    0.013812763028320095,
+    0.01407008085602685,
+    0.01433219225503574,
+    0.014599186524739786,
+    0.014871154628089538,
+    0.015148189222583458,
+    0.015430384691835646,
+    0.015717837177731626,
+    0.01601064461318318,
+    0.016308906755493326,
+    0.01661272522034293,
+    0.016922203516410373,
+    0.0172374470806362,
+    0.01755856331414469,
+    0.01788566161883462,
+    0.01821885343465165,
+    0.01855825227755517,
+    0.018903973778192196,
+    0.019256135721291968,
+    0.019614858085794294,
+    0.019980263085725487,
+    0.020352475211835756,
+    0.02073162127401229,
+    0.02111783044448242,
+    0.02151123430182165,
+    0.021911966875781473,
+    0.022320164692952324,
+    0.02273596682327715,
+    0.02315951492743152,
+    0.02359095330508634,
+    0.024030428944069673,
+    0.0244780915704444,
+    0.02493409369951878,
+    0.02539859068780724,
+    0.02587174078595921,
+    0.02635370519267393,
+    0.026844648109619625,
+    0.0273447367973758,
+    0.027854141632417662,
+    0.028373036165162114,
+    0.028901597179095087,
+    0.029440004751000337,
+    0.02998844231231028,
+    0.03054709671159968,
+    0.0311161582782436,
+    0.03169582088726115,
+    0.032286282025367305,
+    0.0328877428582551,
+    0.033500408299131326,
+    0.034124487078528894,
+    0.034760191815419776,
+    0.035407739089652696,
+    0.03606734951574028,
+    0.036739247818020744,
+    0.03742366290721981,
+    0.03812082795843888,
+    0.03883098049059605,
+    0.039554362447347016,
+    0.04029122027951348,
+    0.04104180502904709,
+    0.04180637241455758,
+    0.04258518291843415,
+    0.04337850187558989,
+    0.04418659956385941,
+    0.045009751296080466,
+    0.04584823751389096,
+    0.0467023438832733,
+    0.04757236139187885,
+    0.048458586448164906,
+    0.049361320982379116,
+    0.05028087254942475,
+    0.051217554433642364,
+    0.052171685755543436,
+    0.05314359158053236,
+    0.054133603029653754,
+    0.055142057392402966,
+    0.05616929824163804,
+    0.05721567555063246,
+    0.0582815458123084,
+    0.0593672721606912,
+    0.06047322449462643,
+    0.06159977960380162,
+    0.06274732129711574,
+    0.06391624053343999,
+    0.06510693555481455,
+    0.06631981202212668,
+    0.0675552831533164,
+    0.06881376986415663,
+    0.07009570091165618,
+    0.07140151304013395,
+    0.07273165113001454,
+    0.0740865683493956,
+    0.07546672630843887,
+    0.07687259521663728,
+    0.07830465404301183,
+    0.07976339067929272,
+    0.08124930210614048,
+    0.08276289456246344,
+    0.08430468371788967,
+    0.0858751948484517,
+    0.08747496301554415,
+    0.08910453324821513,
+    0.09076446072885357,
+    0.0924553109823357,
+    0.09417766006869518,
+    0.09593209477938242,
+    0.09771921283717996,
+    0.09953962309984234,
+    0.10139394576752918,
+    0.10328281259410285,
+    0.10520686710236228,
+    0.10716676480328632,
+    0.10916317341936148,
+    0.1111967731120699,
+    0.11326825671361537,
+    0.11537832996296608,
+    0.11752771174629452,
+    0.11971713434189657,
+    0.1219473436696737,
+    0.12421909954526161,
+    0.12653317593889415,
+    0.12889036123908915,
+    0.1312914585212464,
+    0.1337372858212495,
+    0.13622867641416453,
+    0.1387664790981307,
+    0.14135155848353942,
+    0.14398479528760066,
+    0.1466670866343967,
+    0.14939934636052563,
+    0.15218250532643854,
+    0.1550175117335769,
+    0.15790533144741742,
+    0.1608469483265355,
+    0.1638433645577983,
+    0.16689560099780232,
+    0.17000469752067163,
+    0.17317171337233528,
+    0.17639772753140434,
+    0.17968383907677193,
+    0.18303116756206111,
+    0.18644085339704852,
+    0.18991405823619337,
+    0.19345196537440443,
+    0.19705578015017983,
+    0.20072673035625682,
+    0.20446606665791156,
+    0.20827506301905144,
+    0.21215501713624502,
+    0.21610725088083765,
+    0.22013311074930303,
+    0.2242339683219845,
+    0.22841122073038234,
+    0.2326662911331458,
+    0.2370006292009328,
+    0.2414157116103018,
+    0.2459130425468044,
+    0.25049415421745025,
+    0.2551606073727184,
+    0.2599139918382933,
+    0.26475592705670664,
+    0.26968806263906925,
+    0.27471207892708116,
+    0.2798296875655116,
+    0.2850426320853435,
+    0.2903526884977814,
+    0.29576166589932534,
+    0.3012714070881164,
+    0.30688378919176423,
+    0.31260072430687,
+    0.318424160150465,
+    0.3243560807235808,
+    0.3303985069871855,
+    0.33655349755070907,
+    0.3428231493733967,
+    0.3492095984787268,
+    0.3557150206821382,
+    0.3623416323323146,
+    0.3690916910662775,
+    0.3759674965785464,
+    0.3829713914046277,
+    0.39010576171909894,
+    0.39737303814856045,
+    0.4047756965997318,
+    0.4123162591029748,
+    0.4199972946715302,
+    0.4278214201767613,
+    0.43579130123970256,
+    0.44390965313921665,
+    0.45217924173706975,
+    0.46060288442023983,
+    0.4691834510607794,
+    0.4779238649935595,
+    0.4868271040122279,
+    0.49589620138372115,
+    0.5051342468816761,
+    0.5145443878390924,
+    0.5241298302206057,
+    0.533893839714735,
+    0.5438397428464796,
+    0.5539709281106401,
+    0.5642908471262537,
+    0.5748030158125351,
+    0.5855110155867238,
+    0.596418494584246,
+    0.6075291689016071,
+    0.6188468238624383,
+    0.6303753153071275,
+    0.6421185709064758,
+    0.6540805914998252,
+    0.666265452458115,
+    0.6786773050723295,
+    0.6913203779678128,
+    0.7041989785449289,
+    0.7173174944465612,
+    0.73068039505295,
+    0.7442922330043759,
+    0.758157645752211,
+    0.7722813571388643,
+    0.7866681790071582,
+    0.8013230128396879,
+    0.816250851428722,
+    0.8314567805772055,
+    0.8469459808314577,
+    0.8627237292461442,
+    0.8787954011821311,
+    0.8951664721378292,
+    0.9118425196146562,
+    0.928829225017249,
+    0.9461323755890759,
+    0.9637578663841079,
+    0.9817117022752183,
+    1.0
+  ],
+  "p0_mc": [
+    0.98,
+    0.99,
+    0.995,
+    0.975,
+    1.0,
+    0.98,
+    1.0,
+    0.995,
+    0.985,
+    0.99,
+    0.995,
+    0.985,
+    0.99,
+    0.98,
+    0.99,
+    0.975,
+    0.985,
+    0.98,
+    0.975,
+    0.985,
+    0.97,
+    0.98,
+    0.97,
+    0.98,
+    0.985,
+    0.99,
+    0.99,
+    0.98,
+    0.955,
+    0.985,
+    0.985,
+    0.99,
+    1.0,
+    0.98,
+    0.98,
+    0.98,
+    0.975,
+    0.985,
+    0.975,
+    0.975,
+    0.995,
+    0.975,
+    0.98,
+    0.975,
+    0.98,
+    0.975,
+    0.95,
+    0.98,
+    0.965,
+    0.995,
+    0.95,
+    0.99,
+    0.975,
+    0.985,
+    0.97,
+    0.97,
+    0.97,
+    0.965,
+    0.95,
+    0.96,
+    0.95,
+    0.975,
+    0.96,
+    0.985,
+    0.95,
+    0.96,
+    0.985,
+    0.97,
+    0.95,
+    0.975,
+    0.975,
+    0.95,
+    0.95,
+    0.945,
+    0.945,
+    0.96,
+    0.935,
+    0.945,
+    0.955,
+    0.98,
+    0.985,
+    0.98,
+    0.98,
+    0.96,
+    0.96,
+    0.91,
+    0.96,
+    0.955,
+    0.955,
+    0.95,
+    0.94,
+    0.965,
+    0.945,
+    0.96,
+    0.94,
+    0.91,
+    0.98,
+    0.955,
+    0.915,
+    0.915,
+    0.94,
+    0.955,
+    0.94,
+    0.905,
+    0.89,
+    0.895,
+    0.955,
+    0.93,
+    0.91,
+    0.935,
+    0.91,
+    0.905,
+    0.93,
+    0.88,
+    0.935,
+    0.93,
+    0.95,
+    0.93,
+    0.925,
+    0.895,
+    0.915,
+    0.915,
+    0.91,
+    0.925,
+    0.905,
+    0.9,
+    0.86,
+    0.89,
+    0.915,
+    0.915,
+    0.905,
+    0.865,
+    0.905,
+    0.875,
+    0.895,
+    0.855,
+    0.88,
+    0.89,
+    0.86,
+    0.905,
+    0.87,
+    0.815,
+    0.86,
+    0.855,
+    0.895,
+    0.855,
+    0.88,
+    0.85,
+    0.85,
+    0.865,
+    0.87,
+    0.87,
+    0.865,
+    0.84,
+    0.885,
+    0.835,
+    0.835,
+    0.835,
+    0.815,
+    0.82,
+    0.78,
+    0.84,
+    0.795,
+    0.815,
+    0.775,
+    0.78,
+    0.81,
+    0.795,
+    0.775,
+    0.875,
+    0.83,
+    0.82,
+    0.75,
+    0.78,
+    0.785,
+    0.73,
+    0.8,
+    0.76,
+    0.745,
+    0.79,
+    0.795,
+    0.735,
+    0.805,
+    0.68,
+    0.7,
+    0.74,
+    0.75,
+    0.705,
+    0.755,
+    0.71,
+    0.71,
+    0.65,
+    0.67,
+    0.705,
+    0.67,
+    0.705,
+    0.675,
+    0.76,
+    0.705,
+    0.65,
+    0.71,
+    0.645,
+    0.69,
+    0.595,
+    0.64,
+    0.68,
+    0.705,
+    0.645,
+    0.635,
+    0.63,
+    0.6,
+    0.6,
+    0.555,
+    0.58,
+    0.62,
+    0.6,
+    0.58,
+    0.65,
+    0.57,
+    0.585,
+    0.545,
+    0.54,
+    0.6,
+    0.515,
+    0.56,
+    0.54,
+    0.5,
+    0.51,
+    0.505,
+    0.515,
+    0.495,
+    0.5,
+    0.44,
+    0.495,
+    0.46,
+    0.46,
+    0.44,
+    0.475,
+    0.435,
+    0.43,
+    0.425,
+    0.395,
+    0.425,
+    0.395,
+    0.415,
+    0.36,
+    0.39,
+    0.39,
+    0.425,
+    0.31,
+    0.35,
+    0.36,
+    0.35,
+    0.365,
+    0.315,
+    0.28,
+    0.335,
+    0.33,
+    0.28,
+    0.285,
+    0.275,
+    0.285,
+    0.265,
+    0.285,
+    0.24,
+    0.265,
+    0.23,
+    0.255,
+    0.225,
+    0.22,
+    0.195,
+    0.25,
+    0.225,
+    0.24,
+    0.2,
+    0.19,
+    0.195,
+    0.15,
+    0.165,
+    0.2,
+    0.165,
+    0.145,
+    0.155,
+    0.12,
+    0.13,
+    0.15,
+    0.13,
+    0.135,
+    0.08,
+    0.125,
+    0.13,
+    0.13,
+    0.135,
+    0.095,
+    0.07,
+    0.125,
+    0.07,
+    0.06,
+    0.075,
+    0.08,
+    0.05,
+    0.06,
+    0.08,
+    0.06,
+    0.025,
+    0.075,
+    0.05,
+    0.02,
+    0.035,
+    0.04,
+    0.03,
+    0.05,
+    0.045,
+    0.045,
+    0.02,
+    0.02,
+    0.03,
+    0.01,
+    0.03,
+    0.03,
+    0.025,
+    0.01,
+    0.015,
+    0.015,
+    0.005,
+    0.005,
+    0.02,
+    0.01,
+    0.005,
+    0.005,
+    0.005,
+    0.01,
+    0.005,
+    0.025,
+    0.01,
+    0.005,
+    0.0,
+    0.005,
+    0.005,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.01,
+    0.005,
+    0.005,
+    0.0,
+    0.005,
+    0.0,
+    0.005,
+    0.0,
+    0.005,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.005,
+    0.0,
+    0.0,
+    0.005,
+    0.005,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0
+  ],
+  "phi_mean_mc": [
+    0.98,
+    0.99,
+    0.995,
+    0.975,
+    1.0,
+    0.98,
+    1.0,
+    0.995,
+    0.985,
+    0.99,
+    0.995,
+    0.985,
+    0.99,
+    0.98,
+    0.99,
+    0.975,
+    0.985,
+    0.98,
+    0.975,
+    0.985,
+    0.97,
+    0.98,
+    0.97,
+    0.98,
+    0.985,
+    0.99,
+    0.99,
+    0.98,
+    0.955,
+    0.985,
+    0.985,
+    0.99,
+    1.0,
+    0.98,
+    0.98,
+    0.98,
+    0.975,
+    0.985,
+    0.975,
+    0.975,
+    0.995,
+    0.975,
+    0.98,
+    0.975,
+    0.98,
+    0.975,
+    0.95,
+    0.98,
+    0.965,
+    0.995,
+    0.95,
+    0.99,
+    0.975,
+    0.985,
+    0.97,
+    0.97,
+    0.97,
+    0.965,
+    0.95,
+    0.96,
+    0.95,
+    0.975,
+    0.96,
+    0.985,
+    0.95,
+    0.96,
+    0.985,
+    0.97,
+    0.95,
+    0.975,
+    0.975,
+    0.95,
+    0.95,
+    0.945,
+    0.945,
+    0.96,
+    0.935,
+    0.945,
+    0.955,
+    0.98,
+    0.985,
+    0.98,
+    0.98,
+    0.96,
+    0.96,
+    0.91,
+    0.96,
+    0.955,
+    0.955,
+    0.95,
+    0.94,
+    0.965,
+    0.945,
+    0.96,
+    0.94,
+    0.91,
+    0.98,
+    0.955,
+    0.915,
+    0.915,
+    0.94,
+    0.955,
+    0.94,
+    0.905,
+    0.89,
+    0.895,
+    0.955,
+    0.93,
+    0.91,
+    0.935,
+    0.91,
+    0.905,
+    0.93,
+    0.88,
+    0.935,
+    0.93,
+    0.95,
+    0.93,
+    0.925,
+    0.895,
+    0.915,
+    0.915,
+    0.91,
+    0.925,
+    0.905,
+    0.9,
+    0.86,
+    0.89,
+    0.915,
+    0.915,
+    0.905,
+    0.865,
+    0.905,
+    0.875,
+    0.895,
+    0.855,
+    0.88,
+    0.89,
+    0.86,
+    0.905,
+    0.87,
+    0.815,
+    0.86,
+    0.855,
+    0.895,
+    0.855,
+    0.88,
+    0.85,
+    0.85,
+    0.865,
+    0.87,
+    0.87,
+    0.865,
+    0.84,
+    0.885,
+    0.835,
+    0.835,
+    0.835,
+    0.815,
+    0.82,
+    0.78,
+    0.84,
+    0.795,
+    0.815,
+    0.775,
+    0.78,
+    0.81,
+    0.795,
+    0.775,
+    0.875,
+    0.83,
+    0.82,
+    0.75,
+    0.78,
+    0.785,
+    0.73,
+    0.8,
+    0.76,
+    0.745,
+    0.79,
+    0.795,
+    0.735,
+    0.805,
+    0.68,
+    0.7,
+    0.74,
+    0.75,
+    0.705,
+    0.755,
+    0.71,
+    0.71,
+    0.65,
+    0.67,
+    0.705,
+    0.67,
+    0.705,
+    0.675,
+    0.76,
+    0.705,
+    0.65,
+    0.71,
+    0.645,
+    0.69,
+    0.595,
+    0.64,
+    0.68,
+    0.705,
+    0.645,
+    0.635,
+    0.63,
+    0.6,
+    0.6,
+    0.555,
+    0.58,
+    0.62,
+    0.6,
+    0.58,
+    0.65,
+    0.57,
+    0.585,
+    0.545,
+    0.54,
+    0.6,
+    0.515,
+    0.56,
+    0.54,
+    0.5,
+    0.51,
+    0.505,
+    0.515,
+    0.495,
+    0.5,
+    0.44,
+    0.495,
+    0.46,
+    0.46,
+    0.44,
+    0.475,
+    0.435,
+    0.43,
+    0.425,
+    0.395,
+    0.425,
+    0.395,
+    0.415,
+    0.36,
+    0.39,
+    0.39,
+    0.425,
+    0.31,
+    0.35,
+    0.36,
+    0.35,
+    0.365,
+    0.315,
+    0.28,
+    0.335,
+    0.33,
+    0.28,
+    0.285,
+    0.275,
+    0.285,
+    0.265,
+    0.285,
+    0.24,
+    0.265,
+    0.23,
+    0.255,
+    0.225,
+    0.22,
+    0.195,
+    0.25,
+    0.225,
+    0.24,
+    0.2,
+    0.19,
+    0.195,
+    0.15,
+    0.165,
+    0.2,
+    0.165,
+    0.145,
+    0.155,
+    0.12,
+    0.13,
+    0.15,
+    0.13,
+    0.135,
+    0.08,
+    0.125,
+    0.13,
+    0.13,
+    0.135,
+    0.095,
+    0.07,
+    0.125,
+    0.07,
+    0.06,
+    0.075,
+    0.08,
+    0.05,
+    0.06,
+    0.08,
+    0.06,
+    0.025,
+    0.075,
+    0.05,
+    0.02,
+    0.035,
+    0.04,
+    0.03,
+    0.05,
+    0.045,
+    0.045,
+    0.02,
+    0.02,
+    0.03,
+    0.01,
+    0.03,
+    0.03,
+    0.025,
+    0.01,
+    0.015,
+    0.015,
+    0.005,
+    0.005,
+    0.02,
+    0.01,
+    0.005,
+    0.005,
+    0.005,
+    0.01,
+    0.005,
+    0.025,
+    0.01,
+    0.005,
+    0.0,
+    0.005,
+    0.005,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.01,
+    0.005,
+    0.005,
+    0.0,
+    0.005,
+    0.0,
+    0.005,
+    0.0,
+    0.005,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.005,
+    0.0,
+    0.0,
+    0.005,
+    0.005,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0
+  ],
+  "favg_mean_mc": [
+    0.9803076923076923,
+    0.9901538461538462,
+    0.9950769230769231,
+    0.9753846153846155,
+    1.0,
+    0.9803076923076923,
+    1.0,
+    0.9950769230769231,
+    0.9852307692307692,
+    0.9901538461538462,
+    0.9950769230769231,
+    0.9852307692307692,
+    0.9901538461538462,
+    0.9803076923076923,
+    0.9901538461538462,
+    0.9753846153846155,
+    0.9852307692307692,
+    0.9803076923076923,
+    0.9753846153846155,
+    0.9852307692307692,
+    0.9704615384615386,
+    0.9803076923076923,
+    0.9704615384615386,
+    0.9803076923076923,
+    0.9852307692307692,
+    0.9901538461538462,
+    0.9901538461538462,
+    0.9803076923076923,
+    0.9556923076923076,
+    0.9852307692307692,
+    0.9852307692307692,
+    0.9901538461538462,
+    1.0,
+    0.9803076923076923,
+    0.9803076923076923,
+    0.9803076923076923,
+    0.9753846153846155,
+    0.9852307692307692,
+    0.9753846153846155,
+    0.9753846153846155,
+    0.9950769230769231,
+    0.9753846153846155,
+    0.9803076923076923,
+    0.9753846153846155,
+    0.9803076923076923,
+    0.9753846153846155,
+    0.9507692307692308,
+    0.9803076923076923,
+    0.9655384615384616,
+    0.9950769230769231,
+    0.9507692307692308,
+    0.9901538461538462,
+    0.9753846153846155,
+    0.9852307692307692,
+    0.9704615384615386,
+    0.9704615384615386,
+    0.9704615384615386,
+    0.9655384615384617,
+    0.9507692307692308,
+    0.9606153846153846,
+    0.9507692307692307,
+    0.9753846153846155,
+    0.9606153846153848,
+    0.9852307692307692,
+    0.9507692307692308,
+    0.9606153846153844,
+    0.9852307692307692,
+    0.9704615384615386,
+    0.9507692307692308,
+    0.9753846153846155,
+    0.9753846153846155,
+    0.9507692307692307,
+    0.9507692307692307,
+    0.9458461538461538,
+    0.9458461538461538,
+    0.9606153846153846,
+    0.9359999999999999,
+    0.9458461538461538,
+    0.9556923076923077,
+    0.9803076923076923,
+    0.9852307692307692,
+    0.9803076923076923,
+    0.9803076923076923,
+    0.9606153846153848,
+    0.9606153846153846,
+    0.9113846153846155,
+    0.9606153846153848,
+    0.9556923076923077,
+    0.9556923076923078,
+    0.9507692307692308,
+    0.9409230769230769,
+    0.9655384615384616,
+    0.9458461538461538,
+    0.9606153846153846,
+    0.9409230769230769,
+    0.9113846153846155,
+    0.9803076923076923,
+    0.9556923076923076,
+    0.9163076923076923,
+    0.9163076923076923,
+    0.9409230769230769,
+    0.9556923076923077,
+    0.9409230769230769,
+    0.9064615384615385,
+    0.8916923076923078,
+    0.8966153846153847,
+    0.9556923076923076,
+    0.931076923076923,
+    0.9113846153846155,
+    0.9359999999999999,
+    0.9113846153846155,
+    0.9064615384615385,
+    0.931076923076923,
+    0.8818461538461538,
+    0.9359999999999999,
+    0.931076923076923,
+    0.9507692307692308,
+    0.931076923076923,
+    0.9261538461538461,
+    0.8966153846153847,
+    0.9163076923076923,
+    0.9163076923076923,
+    0.9113846153846155,
+    0.9261538461538461,
+    0.9064615384615385,
+    0.9015384615384616,
+    0.8621538461538463,
+    0.8916923076923077,
+    0.9163076923076923,
+    0.9163076923076923,
+    0.9064615384615383,
+    0.8670769230769231,
+    0.9064615384615385,
+    0.8769230769230769,
+    0.8966153846153847,
+    0.8572307692307691,
+    0.8818461538461538,
+    0.8916923076923078,
+    0.862153846153846,
+    0.9064615384615385,
+    0.8719999999999999,
+    0.8178461538461539,
+    0.862153846153846,
+    0.8572307692307694,
+    0.8966153846153847,
+    0.8572307692307691,
+    0.8818461538461538,
+    0.8523076923076922,
+    0.8523076923076922,
+    0.867076923076923,
+    0.872,
+    0.872,
+    0.8670769230769231,
+    0.8424615384615385,
+    0.8867692307692308,
+    0.8375384615384616,
+    0.8375384615384616,
+    0.8375384615384616,
+    0.8178461538461539,
+    0.8227692307692308,
+    0.7833846153846153,
+    0.8424615384615385,
+    0.7981538461538462,
+    0.8178461538461538,
+    0.7784615384615384,
+    0.7833846153846153,
+    0.812923076923077,
+    0.7981538461538462,
+    0.7784615384615384,
+    0.8769230769230769,
+    0.8326153846153846,
+    0.8227692307692307,
+    0.7538461538461538,
+    0.7833846153846153,
+    0.7883076923076922,
+    0.7341538461538463,
+    0.8030769230769232,
+    0.7636923076923077,
+    0.7489230769230769,
+    0.7932307692307691,
+    0.798153846153846,
+    0.7390769230769232,
+    0.8079999999999999,
+    0.6849230769230769,
+    0.7046153846153845,
+    0.7439999999999999,
+    0.7538461538461538,
+    0.7095384615384615,
+    0.7587692307692308,
+    0.7144615384615385,
+    0.7144615384615384,
+    0.6553846153846153,
+    0.6750769230769231,
+    0.7095384615384615,
+    0.6750769230769231,
+    0.7095384615384616,
+    0.68,
+    0.7636923076923077,
+    0.7095384615384615,
+    0.6553846153846153,
+    0.7144615384615385,
+    0.6504615384615385,
+    0.6947692307692307,
+    0.6012307692307692,
+    0.6455384615384615,
+    0.6849230769230769,
+    0.7095384615384616,
+    0.6504615384615384,
+    0.6406153846153846,
+    0.6356923076923077,
+    0.6061538461538462,
+    0.6061538461538462,
+    0.5618461538461539,
+    0.5864615384615385,
+    0.6258461538461537,
+    0.6061538461538462,
+    0.5864615384615385,
+    0.6553846153846155,
+    0.5766153846153846,
+    0.5913846153846154,
+    0.5519999999999999,
+    0.547076923076923,
+    0.6061538461538462,
+    0.5224615384615384,
+    0.5667692307692307,
+    0.547076923076923,
+    0.5076923076923077,
+    0.5175384615384615,
+    0.5126153846153846,
+    0.5224615384615384,
+    0.5027692307692306,
+    0.5076923076923077,
+    0.4486153846153846,
+    0.5027692307692307,
+    0.46830769230769226,
+    0.46830769230769226,
+    0.4486153846153846,
+    0.48307692307692307,
+    0.44369230769230766,
+    0.4387692307692308,
+    0.4338461538461539,
+    0.4043076923076923,
+    0.4338461538461539,
+    0.4043076923076923,
+    0.42399999999999993,
+    0.3698461538461538,
+    0.3993846153846154,
+    0.39938461538461534,
+    0.4338461538461539,
+    0.3206153846153845,
+    0.36,
+    0.3698461538461538,
+    0.36,
+    0.37476923076923074,
+    0.3255384615384615,
+    0.291076923076923,
+    0.3452307692307691,
+    0.34030769230769226,
+    0.291076923076923,
+    0.29599999999999993,
+    0.28615384615384615,
+    0.296,
+    0.27630769230769225,
+    0.296,
+    0.25169230769230766,
+    0.27630769230769225,
+    0.2418461538461538,
+    0.2664615384615384,
+    0.2369230769230769,
+    0.23199999999999996,
+    0.20738461538461536,
+    0.2615384615384615,
+    0.2369230769230769,
+    0.25169230769230766,
+    0.21230769230769225,
+    0.20246153846153842,
+    0.20738461538461536,
+    0.16307692307692306,
+    0.17784615384615382,
+    0.21230769230769225,
+    0.17784615384615382,
+    0.15815384615384612,
+    0.16799999999999998,
+    0.13353846153846152,
+    0.14338461538461533,
+    0.16307692307692306,
+    0.14338461538461536,
+    0.14830769230769228,
+    0.09415384615384614,
+    0.13846153846153844,
+    0.14338461538461533,
+    0.14338461538461533,
+    0.14830769230769228,
+    0.10892307692307689,
+    0.08430769230769229,
+    0.13846153846153844,
+    0.08430769230769229,
+    0.07446153846153844,
+    0.08923076923076921,
+    0.09415384615384614,
+    0.0646153846153846,
+    0.07446153846153844,
+    0.09415384615384614,
+    0.07446153846153844,
+    0.039999999999999994,
+    0.08923076923076921,
+    0.0646153846153846,
+    0.035076923076923075,
+    0.04984615384615384,
+    0.05476923076923075,
+    0.04492307692307693,
+    0.0646153846153846,
+    0.05969230769230768,
+    0.059692307692307676,
+    0.03507692307692307,
+    0.035076923076923075,
+    0.04492307692307691,
+    0.02523076923076923,
+    0.044923076923076906,
+    0.04492307692307691,
+    0.039999999999999994,
+    0.02523076923076923,
+    0.030153846153846146,
+    0.03015384615384615,
+    0.020307692307692308,
+    0.020307692307692308,
+    0.035076923076923075,
+    0.025230769230769227,
+    0.020307692307692308,
+    0.020307692307692308,
+    0.020307692307692308,
+    0.02523076923076923,
+    0.020307692307692308,
+    0.039999999999999994,
+    0.02523076923076923,
+    0.020307692307692308,
+    0.015384615384615385,
+    0.020307692307692308,
+    0.020307692307692308,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.025230769230769227,
+    0.020307692307692308,
+    0.020307692307692308,
+    0.015384615384615385,
+    0.020307692307692308,
+    0.015384615384615385,
+    0.020307692307692308,
+    0.015384615384615385,
+    0.020307692307692308,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.020307692307692308,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.020307692307692308,
+    0.020307692307692308,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385,
+    0.015384615384615385
+  ]
+}
+
+==============================
+FILE: ./src/qem_yrw_project/__init__.py
+==============================
+
+
+
+==============================
+FILE: ./src/qem_yrw_project/pauli_jump.py
+==============================
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Literal
+
+import numpy as np
+from qiskit import QuantumCircuit
+
+
+@dataclass(frozen=True)
+class PauliJumpStats:
+    gamma: float
+    seed: int
+    n_noise_ops: int
+
+
+def apply_pauli_jump_after_each_gate(
+    circuit: QuantumCircuit,
+    gamma: float,
+    seed: int,
+    *,
+    paulis: tuple[Literal["X", "Y", "Z"], ...] = ("X", "Y", "Z"),
+    skip_ops: tuple[str, ...] = ("measure", "barrier"),
+) -> tuple[QuantumCircuit, PauliJumpStats]:
+    """
+    Stochastic Pauli-jump model:
+      - After each gate, for each involved qubit independently:
+          with prob=gamma, append a random Pauli in `paulis`.
+      - Skips operations with names in `skip_ops` (e.g., measure, barrier).
+    """
+    if not (0.0 <= gamma <= 1.0):
+        raise ValueError("gamma must be in [0, 1].")
+
+    rng = np.random.default_rng(seed)
+
+    noisy = QuantumCircuit(circuit.num_qubits, circuit.num_clbits, name=f"{circuit.name}_pauli_jump")
+    noisy.global_phase = circuit.global_phase
+
+    n_noise = 0
+
+    for inst, qargs, cargs in circuit.data:
+        # map bits by index (robust across registers)
+        nq = [noisy.qubits[circuit.find_bit(q).index] for q in qargs]
+        nc = [noisy.clbits[circuit.find_bit(c).index] for c in cargs]
+        noisy.append(inst, nq, nc)
+
+        if inst.name in skip_ops:
+            continue
+
+        # per-qubit independent jump after this gate
+        for q in qargs:
+            if rng.random() < gamma:
+                qidx = circuit.find_bit(q).index
+                p = paulis[int(rng.integers(len(paulis)))]
+                if p == "X":
+                    noisy.x(qidx)
+                elif p == "Y":
+                    noisy.y(qidx)
+                elif p == "Z":
+                    noisy.z(qidx)
+                else:
+                    raise RuntimeError("Invalid Pauli label.")
+                n_noise += 1
+
+    return noisy, PauliJumpStats(gamma=gamma, seed=seed, n_noise_ops=n_noise)
+
+
+==============================
+FILE: ./src/qem_yrw_project/metrics/__init__.py
+==============================
+
+
+
+==============================
+FILE: ./src/qem_yrw_project/circuits/__init__.py
+==============================
+
+from .twolocal import build_twolocal
+
+__all__ = ["build_twolocal"]
+
+
+==============================
+FILE: ./src/qem_yrw_project/circuits/twolocal.py
+==============================
+
+from __future__ import annotations
+
+import numpy as np
+from qiskit.circuit.library import TwoLocal
+
+
+def build_twolocal(
+    num_qubits: int = 6,
+    depth: int | None = None,
+    seed: int = 0,
+    add_measurements: bool = True,
+):
+    """
+    Build a TwoLocal circuit similar to YAQS docs example:
+      - rotation blocks: rx
+      - entanglement blocks: rzz
+      - linear entanglement
+      - reps = depth (default: num_qubits)
+      - random parameters in [-pi, pi]
+    """
+    if depth is None:
+        depth = num_qubits
+
+    circuit = TwoLocal(
+        num_qubits,
+        rotation_blocks=["rx"],
+        entanglement_blocks=["rzz"],
+        entanglement="linear",
+        reps=depth,
+    ).decompose()
+
+    rng = np.random.default_rng(seed)
+    values = rng.uniform(-np.pi, np.pi, size=len(circuit.parameters))
+    circuit.assign_parameters(values, inplace=True)
+
+    if add_measurements:
+        circuit.measure_all()
+
+    return circuit
+
+
+==============================
+FILE: ./src/qem_yrw_project/utils/__init__.py
+==============================
+
+
+
+==============================
+FILE: ./src/qem_yrw_project/models/__init__.py
+==============================
+
+
+
+==============================
+FILE: ./src/qem_yrw_project/adapters/qiskit_backend.py
+==============================
+
+from __future__ import annotations
+from typing import Any, Dict, Optional
+import numpy as np
+from qiskit.quantum_info import Statevector
+from .base import RunMeta
+
+class QiskitBackend:
+    name = "qiskit"
+
+    def ideal_expectation(self, circuit: Any, observable: Any):
+        sv = Statevector.from_instruction(circuit)
+        val = float(observable(sv))
+        return val, RunMeta(backend=self.name, extra={})
+
+    def noisy_mc_expectations(
+        self,
+        circuit: Any,
+        observable: Any,
+        noise_cfg: Dict[str, Any],
+        n_traj: int,
+        seed: Optional[int] = None,
+    ):
+        raise NotImplementedError("Implement later (Aer or your MC).")
+
+
+==============================
+FILE: ./src/qem_yrw_project/adapters/yaqs_backend.py
+==============================
+
+from __future__ import annotations
+from typing import Any, Dict, Optional
+import numpy as np
+from .base import RunMeta
+
+class YaqsBackend:
+    name = "yaqs"
+
+    def ideal_expectation(self, circuit: Any, observable: Any):
+        raise NotImplementedError("Implement via YAQS later.")
+
+    def noisy_mc_expectations(
+        self,
+        circuit: Any,
+        observable: Any,
+        noise_cfg: Dict[str, Any],
+        n_traj: int,
+        seed: Optional[int] = None,
+    ):
+        raise NotImplementedError("Implement via YAQS later.")
+
+
+==============================
+FILE: ./src/qem_yrw_project/adapters/__init__.py
+==============================
+
+
+
+==============================
+FILE: ./src/qem_yrw_project/adapters/factory.py
+==============================
+
+from __future__ import annotations
+from .qiskit_backend import QiskitBackend
+from .yaqs_backend import YaqsBackend
+
+def make_backend(name: str):
+    name = name.lower().strip()
+    if name == "qiskit":
+        return QiskitBackend()
+    if name == "yaqs":
+        return YaqsBackend()
+    raise ValueError(f"Unknown backend: {name}")
+
+
+==============================
+FILE: ./src/qem_yrw_project/adapters/base.py
+==============================
+
+from __future__ import annotations
+from dataclasses import dataclass
+from typing import Protocol, Any, Dict, Optional
+import numpy as np
+
+@dataclass(frozen=True)
+class RunMeta:
+    backend: str
+    seed: Optional[int] = None
+    extra: Dict[str, Any] | None = None
+
+class Backend(Protocol):
+    name: str
+
+    def ideal_expectation(self, circuit: Any, observable: Any) -> tuple[float, RunMeta]:
+        ...
+
+    def noisy_mc_expectations(
+        self,
+        circuit: Any,
+        observable: Any,
+        noise_cfg: Dict[str, Any],
+        n_traj: int,
+        seed: Optional[int] = None,
+    ) -> tuple[np.ndarray, RunMeta]:
+        ...
+
+
+==============================
+FILE: ./src/qem_yrw_project/plotting/__init__.py
+==============================
+
+
+
+==============================
+FILE: ./src/qem_yrw_project/noise/__init__.py
+==============================
+
+from .pauli_jump import apply_pauli_jump_after_each_gate, PauliJumpStats
+
+__all__ = ["apply_pauli_jump_after_each_gate", "PauliJumpStats"]
+
+
+
+==============================
+FILE: ./src/qem_yrw_project/noise/pauli_jump.py
+==============================
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Tuple
+
+import numpy as np
+from qiskit import QuantumCircuit
+
+
+@dataclass
+class PauliJumpStats:
+    gamma: float
+    seed: int
+    n_gates_seen: int = 0
+    n_noise_ops: int = 0
+
+
+def apply_pauli_jump_after_each_gate(
+    circuit: QuantumCircuit,
+    gamma: float,
+    seed: int,
+    *,
+    include_measurements: bool = False,
+) -> Tuple[QuantumCircuit, PauliJumpStats]:
+    """
+    Insert stochastic Pauli X/Y/Z gates AFTER each gate.
+
+    - gamma is the jump probability.
+    - For each instruction (excluding barrier/measure/reset), for each involved qubit:
+        with prob gamma apply a random Pauli {X,Y,Z} AFTER the gate.
+    """
+    if not (0.0 <= gamma <= 1.0):
+        raise ValueError(f"gamma must be in [0,1], got {gamma}")
+
+    rng = np.random.default_rng(seed)
+    stats = PauliJumpStats(gamma=gamma, seed=seed)
+
+    # Keep registers if they exist
+    out = QuantumCircuit(*circuit.qregs, *circuit.cregs) if (circuit.qregs or circuit.cregs) else QuantumCircuit(circuit.num_qubits, circuit.num_clbits)
+
+    for inst, qargs, cargs in circuit.data:
+        name = inst.name.lower()
+
+        # StrongSim / EquiCheck usually wants unitary circuits
+        if name == "measure" and (not include_measurements):
+            continue
+
+        out.append(inst, qargs, cargs)
+
+        # Do not add noise after these
+        if name in ("barrier", "measure", "reset"):
+            continue
+
+        stats.n_gates_seen += 1
+
+        # Apply noise AFTER the gate on each involved qubit independently
+        for q in qargs:
+            if rng.random() < gamma:
+                r = int(rng.integers(0, 3))
+                if r == 0:
+                    out.x(q)
+                elif r == 1:
+                    out.y(q)
+                else:
+                    out.z(q)
+                stats.n_noise_ops += 1
+
+    return out, stats
+
+
+==============================
+FILE: ./src/qem_yrw_project/sim/__init__.py
+==============================
+
+
