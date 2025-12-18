@@ -1,95 +1,109 @@
 import argparse
 import json
-from pathlib import Path
 from datetime import datetime
+from pathlib import Path
+
 import numpy as np
 import matplotlib.pyplot as plt
+from qiskit import qpy
 
-def _parse_list_floats(s: str):
-    return [float(x) for x in s.split(",") if x.strip()]
+from qem_yrw_project.noise.pauli_jump import apply_pauli_jump_after_each_gate
 
-def _parse_list_ints(s: str):
-    return [int(x) for x in s.split(",") if x.strip()]
+def _count_sites(circ):
+    n = 0
+    for inst, qargs, _ in circ.data:
+        name = inst.name.lower()
+        if name in ("barrier", "measure", "reset"):
+            continue
+        n += len(qargs)
+    return n
+
+def _parse_gamma_list(s):
+    xs = []
+    for p in s.split(","):
+        p = p.strip()
+        if p:
+            xs.append(float(p))
+    return xs
+
+def _batch_sizes(tmax):
+    a = list(range(10, min(110, tmax + 1), 10))
+    b = []
+    for k in (200, 300, 500, 800, 1000, 2000, 5000, 10000):
+        if k <= tmax and k not in a:
+            b.append(k)
+    c = [tmax] if tmax not in a and tmax not in b else []
+    return a + b + c
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--config", type=str, default=None)
-    ap.add_argument("--gamma-list", type=str, default="1e-3,1e-2,1e-1")
     ap.add_argument("--tmax", type=int, default=10000)
+    ap.add_argument("--gamma-list", type=str, default="1e-3,1e-2,1e-1")
     ap.add_argument("--n-batches", type=int, default=50)
-    ap.add_argument("--batch-sizes", type=str, default="10,20,30,40,50,80,100,150,200,300,500,800,1000,2000,5000,10000")
-    ap.add_argument("--n-sites", type=int, default=10)
+    ap.add_argument("--shots", type=int, default=200)
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
 
-    if args.config is not None:
-        try:
-            import yaml
-        except Exception as e:
-            raise RuntimeError("PyYAML is required for --config") from e
-        cfg = yaml.safe_load(Path(args.config).read_text())
-        args.gamma_list = ",".join(str(x) for x in cfg.get("gamma_list", _parse_list_floats(args.gamma_list)))
-        args.tmax = int(cfg.get("tmax", args.tmax))
-        args.n_batches = int(cfg.get("n_batches", args.n_batches))
-        args.batch_sizes = ",".join(str(x) for x in cfg.get("batch_sizes", _parse_list_ints(args.batch_sizes)))
-        args.n_sites = int(cfg.get("n_sites", args.n_sites))
-        args.seed = int(cfg.get("seed", args.seed))
+    root = Path(__file__).resolve().parents[1]
+    qpy_path = root / "outputs" / "ideal" / "twolocal_n6_seed0" / "circuit_ideal.qpy"
+    if not qpy_path.exists():
+        raise FileNotFoundError(f"Missing ideal QPY: {qpy_path}. Run make_ideal_twolocal_n6.py first.")
 
-    gammas = _parse_list_floats(args.gamma_list)
-    batch_sizes = _parse_list_ints(args.batch_sizes)
-    batch_sizes = [m for m in batch_sizes if 1 <= m <= args.tmax]
-    if len(batch_sizes) == 0:
-        raise ValueError("No valid batch sizes <= tmax")
+    with open(qpy_path, "rb") as f:
+        ideal = qpy.load(f)[0]
 
-    outdir = Path("outputs") / "teacher" / f"mc_convergence_sites{args.n_sites}_seed{args.seed}" / datetime.now().strftime("%Y%m%d-%H%M%S")
+    n = ideal.num_qubits
+    d = 2 ** n
+    n_sites = _count_sites(ideal)
+    gammas = _parse_gamma_list(args.gamma_list)
+    sizes = _batch_sizes(args.tmax)
+
+    ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+    outdir = root / "outputs" / "experiments" / f"mc_convergence_n{n}_seed{args.seed}" / ts
     outdir.mkdir(parents=True, exist_ok=True)
 
-    rng = np.random.default_rng(args.seed)
-    results = {"meta": {"tmax": args.tmax, "n_batches": args.n_batches, "batch_sizes": batch_sizes, "n_sites": args.n_sites, "seed": args.seed},
-               "by_gamma": {}}
+    results = {"n": n, "d": d, "n_sites": n_sites, "tmax": args.tmax, "n_batches": args.n_batches, "seed": args.seed, "gammas": gammas, "sizes": sizes, "curves": {}}
 
-    for g in gammas:
-        p0 = (1.0 - g) ** args.n_sites
-        traj = (rng.random(args.tmax) < p0).astype(np.float64)
-        ref = float(traj.mean())
+    plt.figure()
 
-        errs_mean = []
-        errs_std = []
+    for gi, g in enumerate(gammas):
+        vals = np.zeros(args.tmax, dtype=float)
+        for t in range(args.tmax):
+            shot_seed = args.seed * 1000003 + gi * 104729 + t
+            _, st = apply_pauli_jump_after_each_gate(ideal, float(g), seed=int(shot_seed), include_measurements=False)
+            vals[t] = 1.0 if st.n_noise_ops == 0 else (1.0 / (d + 1.0))
+        ref = float(np.mean(vals))
 
-        idx_all = np.arange(args.tmax)
-        for m in batch_sizes:
-            e = []
+        mean_err = []
+        std_err = []
+        rng = np.random.default_rng(args.seed + gi * 99991)
+
+        for k in sizes:
+            errs = []
             for _ in range(args.n_batches):
-                pick = rng.choice(idx_all, size=m, replace=False)
-                est = float(traj[pick].mean())
-                e.append(abs(est - ref))
-            e = np.array(e, dtype=np.float64)
-            errs_mean.append(float(e.mean()))
-            errs_std.append(float(e.std(ddof=1) if len(e) > 1 else 0.0))
+                idx = rng.choice(args.tmax, size=int(k), replace=False)
+                m = float(np.mean(vals[idx]))
+                errs.append(abs(m - ref))
+            mean_err.append(float(np.mean(errs)))
+            std_err.append(float(np.std(errs)))
 
-        results["by_gamma"][str(g)] = {"p0_theory": float(p0), "ref_mean": ref, "batch_err_mean": errs_mean, "batch_err_std": errs_std}
-        print(f"gamma={g:.3e}  p0={p0:.6f}  ref={ref:.6f}")
+        results["curves"][str(g)] = {"ref": ref, "mean_abs_err": mean_err, "std_abs_err": std_err}
+        plt.loglog(sizes, mean_err)
 
-    (outdir / "results.json").write_text(json.dumps(results, indent=2))
+        print(f"gamma={g:.3e} ref={ref:.6f} done", flush=True)
 
-    xs = np.array(batch_sizes, dtype=np.float64)
-    for g in gammas:
-        d = results["by_gamma"][str(g)]
-        ys = np.array(d["batch_err_mean"], dtype=np.float64)
-        plt.plot(xs, ys, label=f"gamma={g:g}")
+    with open(outdir / "results.json", "w") as f:
+        json.dump(results, f, indent=2)
 
-    plt.xscale("log")
-    plt.yscale("log")
-    plt.xlabel("batch size (# trajectories)")
-    plt.ylabel("mean |estimate - reference|")
-    plt.title(f"MC convergence (Bernoulli proxy), sites={args.n_sites}, tmax={args.tmax}, batches={args.n_batches}")
-    plt.legend()
-    figpath = outdir / "mc_convergence.png"
-    plt.savefig(figpath, dpi=200, bbox_inches="tight")
+    plt.xlabel("num_trajectories")
+    plt.ylabel("mean |batch_mean - ref_mean|")
+    plt.title(f"MC convergence (proxy fidelity), n={n}, sites={n_sites}, tmax={args.tmax}")
+    plt.tight_layout()
+    plt.savefig(outdir / "mc_convergence.png", dpi=200)
     plt.close()
 
-    print(f"WROTE: {outdir}")
-    print(f"FIG : {figpath}")
+    print(f"WROTE: {outdir}", flush=True)
+    print(f"FIG : {outdir/'mc_convergence.png'}", flush=True)
 
 if __name__ == "__main__":
     main()
