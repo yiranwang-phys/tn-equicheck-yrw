@@ -1,109 +1,131 @@
 import argparse
 import json
+from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 
 import numpy as np
 import matplotlib.pyplot as plt
-from qiskit import qpy
 
-from qem_yrw_project.noise.pauli_jump import apply_pauli_jump_after_each_gate
+from qem_yrw_project.circuits.twolocal import build_twolocal
 
-def _count_sites(circ):
-    n = 0
-    for inst, qargs, _ in circ.data:
-        name = inst.name.lower()
-        if name in ("barrier", "measure", "reset"):
-            continue
-        n += len(qargs)
-    return n
 
-def _parse_gamma_list(s):
-    xs = []
-    for p in s.split(","):
-        p = p.strip()
-        if p:
-            xs.append(float(p))
-    return xs
+def _ts() -> str:
+    return datetime.now().strftime("%Y%m%d-%H%M%S")
 
-def _batch_sizes(tmax):
-    a = list(range(10, min(110, tmax + 1), 10))
-    b = []
-    for k in (200, 300, 500, 800, 1000, 2000, 5000, 10000):
-        if k <= tmax and k not in a:
-            b.append(k)
-    c = [tmax] if tmax not in a and tmax not in b else []
-    return a + b + c
 
-def main():
+def _sci(x: float) -> str:
+    return f"{x:.0e}".replace("+", "")
+
+
+def _count_injection_sites(circ) -> int:
+    sites = 0
+    for ci in circ.data:
+        if ci.operation.name != "measure":
+            sites += 1
+    return sites
+
+
+@dataclass
+class Result:
+    num_qubits: int
+    depth: int
+    seed: int
+    gammas: list
+    tmax: int
+    n_batches: int
+    subset_sizes: list
+    sites: int
+    ref: dict
+    mean_abs_error: dict
+
+
+def main() -> None:
     ap = argparse.ArgumentParser()
+    ap.add_argument("--num-qubits", type=int, default=6)
+    ap.add_argument("--depth", type=int, default=6)
+    ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--tmax", type=int, default=10000)
     ap.add_argument("--gamma-list", type=str, default="1e-3,1e-2,1e-1")
     ap.add_argument("--n-batches", type=int, default=50)
-    ap.add_argument("--shots", type=int, default=200)
-    ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--subset-sizes", type=str, default="")
     args = ap.parse_args()
 
-    root = Path(__file__).resolve().parents[1]
-    qpy_path = root / "outputs" / "ideal" / "twolocal_n6_seed0" / "circuit_ideal.qpy"
-    if not qpy_path.exists():
-        raise FileNotFoundError(f"Missing ideal QPY: {qpy_path}. Run make_ideal_twolocal_n6.py first.")
+    gammas = [float(x) for x in args.gamma_list.split(",") if x.strip()]
 
-    with open(qpy_path, "rb") as f:
-        ideal = qpy.load(f)[0]
+    if args.subset_sizes.strip():
+        subset_sizes = [int(x) for x in args.subset_sizes.split(",") if x.strip()]
+    else:
+        subset_sizes = [10, 20, 50, 100, 200, 500, 1000, 2000, 5000, args.tmax]
+    subset_sizes = [m for m in subset_sizes if m <= args.tmax]
+    subset_sizes = sorted(list(dict.fromkeys(subset_sizes)))
 
-    n = ideal.num_qubits
-    d = 2 ** n
-    n_sites = _count_sites(ideal)
-    gammas = _parse_gamma_list(args.gamma_list)
-    sizes = _batch_sizes(args.tmax)
+    rng = np.random.default_rng(args.seed)
 
-    ts = datetime.now().strftime("%Y%m%d-%H%M%S")
-    outdir = root / "outputs" / "experiments" / f"mc_convergence_n{n}_seed{args.seed}" / ts
-    outdir.mkdir(parents=True, exist_ok=True)
+    ideal = build_twolocal(num_qubits=args.num_qubits, depth=args.depth, seed=args.seed, add_measurements=False)
+    sites = _count_injection_sites(ideal)
+    d = 2 ** int(args.num_qubits)
 
-    results = {"n": n, "d": d, "n_sites": n_sites, "tmax": args.tmax, "n_batches": args.n_batches, "seed": args.seed, "gammas": gammas, "sizes": sizes, "curves": {}}
+    ref = {}
+    mean_abs_error = {}
 
-    plt.figure()
+    for gamma in gammas:
+        p0 = (1.0 - float(gamma)) ** float(sites)
+        phi = (rng.random(int(args.tmax)) < p0).astype(float)
+        favg = (d * phi + 1.0) / (d + 1.0)
 
-    for gi, g in enumerate(gammas):
-        vals = np.zeros(args.tmax, dtype=float)
-        for t in range(args.tmax):
-            shot_seed = args.seed * 1000003 + gi * 104729 + t
-            _, st = apply_pauli_jump_after_each_gate(ideal, float(g), seed=int(shot_seed), include_measurements=False)
-            vals[t] = 1.0 if st.n_noise_ops == 0 else (1.0 / (d + 1.0))
-        ref = float(np.mean(vals))
+        ref_val = float(np.mean(favg))
+        ref[_sci(gamma)] = ref_val
 
-        mean_err = []
-        std_err = []
-        rng = np.random.default_rng(args.seed + gi * 99991)
+        errs = []
+        for m in subset_sizes:
+            batch_err = []
+            for _ in range(int(args.n_batches)):
+                idx = rng.choice(int(args.tmax), size=int(m), replace=False)
+                est = float(np.mean(favg[idx]))
+                batch_err.append(abs(est - ref_val))
+            errs.append(float(np.mean(batch_err)))
+            print(f"gamma={gamma:.3e}  m={m:5d}  mean_abs_err={errs[-1]:.6g}", flush=True)
 
-        for k in sizes:
-            errs = []
-            for _ in range(args.n_batches):
-                idx = rng.choice(args.tmax, size=int(k), replace=False)
-                m = float(np.mean(vals[idx]))
-                errs.append(abs(m - ref))
-            mean_err.append(float(np.mean(errs)))
-            std_err.append(float(np.std(errs)))
+        mean_abs_error[_sci(gamma)] = errs
 
-        results["curves"][str(g)] = {"ref": ref, "mean_abs_err": mean_err, "std_abs_err": std_err}
-        plt.loglog(sizes, mean_err)
+    out_dir = Path("outputs") / "experiments" / "mc_convergence" / f"twolocal_n{args.num_qubits}_seed{args.seed}" / _ts()
+    out_dir.mkdir(parents=True, exist_ok=True)
 
-        print(f"gamma={g:.3e} ref={ref:.6f} done", flush=True)
+    res = Result(
+        num_qubits=int(args.num_qubits),
+        depth=int(args.depth),
+        seed=int(args.seed),
+        gammas=[float(g) for g in gammas],
+        tmax=int(args.tmax),
+        n_batches=int(args.n_batches),
+        subset_sizes=[int(m) for m in subset_sizes],
+        sites=int(sites),
+        ref=ref,
+        mean_abs_error=mean_abs_error,
+    )
+    (out_dir / "results.json").write_text(json.dumps(asdict(res), indent=2))
 
-    with open(outdir / "results.json", "w") as f:
-        json.dump(results, f, indent=2)
+    fig = plt.figure()
+    ax = fig.add_subplot(111)
+    x = np.array(subset_sizes, dtype=float)
+    for gamma in gammas:
+        key = _sci(gamma)
+        y = np.array(mean_abs_error[key], dtype=float)
+        ax.plot(x, y, linewidth=2.0, label=f"gamma={key}")
+    ax.set_xscale("log")
+    ax.set_yscale("log")
+    ax.set_xlabel("number of trajectories (subset size)")
+    ax.set_ylabel("mean absolute error to Tmax reference")
+    ax.set_title(f"MC convergence (Tmax={args.tmax}, batches={args.n_batches}, sites={sites})")
+    ax.legend(loc="best")
+    fig.tight_layout()
+    fig.savefig(out_dir / "mc_convergence_loglog.png", dpi=200)
+    plt.close(fig)
 
-    plt.xlabel("num_trajectories")
-    plt.ylabel("mean |batch_mean - ref_mean|")
-    plt.title(f"MC convergence (proxy fidelity), n={n}, sites={n_sites}, tmax={args.tmax}")
-    plt.tight_layout()
-    plt.savefig(outdir / "mc_convergence.png", dpi=200)
-    plt.close()
+    print(f"WROTE: {out_dir}", flush=True)
+    print(f"FIG : {out_dir / 'mc_convergence_loglog.png'}", flush=True)
 
-    print(f"WROTE: {outdir}", flush=True)
-    print(f"FIG : {outdir/'mc_convergence.png'}", flush=True)
 
 if __name__ == "__main__":
     main()
