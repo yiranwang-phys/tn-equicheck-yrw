@@ -28,3 +28,9 @@ outputs_backup_*.tar.gz
 *.tgz
 __pycache__/
 *.pyc
+output/
+*.npz
+*.npy
+*.pkl
+*.png
+*.pdf
