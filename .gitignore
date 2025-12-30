@@ -19,8 +19,6 @@ venv/
 # macOS
 .DS_Store
 
-# Outputs (DO NOT COMMIT)
-outputs/
 
 
 outputs_backup_*.tar.gz
@@ -29,9 +27,5 @@ outputs_backup_*.tar.gz
 __pycache__/
 *.pyc
 output/
-*.npz
-*.npy
-*.pkl
-*.png
-*.pdf
+
 scripts/_drafts/
