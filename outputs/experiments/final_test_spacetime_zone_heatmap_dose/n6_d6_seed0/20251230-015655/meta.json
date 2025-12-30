@@ -1,0 +1,45 @@
+{
+  "time": "2025-12-30T01:56:55.519620",
+  "platform": "Windows-11-10.0.26100-SP0",
+  "python": "3.13.9",
+  "n": 6,
+  "depth": 6,
+  "seed": 0,
+  "gamma": 0.01,
+  "traj": 2000,
+  "chunk": 50,
+  "workers": 32,
+  "blas_threads": 1,
+  "yaqs": {
+    "max_bond_dim": 256,
+    "threshold": 1e-12,
+    "pad": 0
+  },
+  "grid": {
+    "tfracs": [
+      0.0,
+      0.25,
+      0.5,
+      0.75,
+      1.0
+    ],
+    "inst_cuts": [
+      0,
+      18,
+      36,
+      54,
+      72
+    ],
+    "ks": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+    ]
+  },
+  "S_total": 102,
+  "inst_max": 72
+}

@@ -1,0 +1,19 @@
+{
+  "time": "2025-12-30T00:54:37.979842",
+  "platform": "Windows-11-10.0.26100-SP0",
+  "python": "3.13.9",
+  "workers": 16,
+  "blas_threads": 1,
+  "n": 6,
+  "depth": 6,
+  "seed": 0,
+  "use_transpile": 1,
+  "opt_level": 1,
+  "seed_transpiler": 123,
+  "yaqs": {
+    "max_bond_dim": 256,
+    "threshold": 1e-12
+  },
+  "noise_kind": "depolarizing_xyz",
+  "seed_base_paired": 20251220
+}

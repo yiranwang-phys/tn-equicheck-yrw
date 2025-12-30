@@ -1,0 +1,14 @@
+{
+  "elapsed_sec": 277.37491106987,
+  "S_total": 102,
+  "inst_max": 72,
+  "meanF_grid_shape": [
+    7,
+    5
+  ],
+  "notes": {
+    "why_blocks": "Different cells have different #active sites S, so expected noise events ~ gamma*S differ.",
+    "active_qubits": "K means allow noise only on qubits 0..K-1 (spatial prefix).",
+    "time_fraction": "mapped to inst_cut=floor(tfrac*inst_max), so many small tfrac may map to inst_cut=0 -> no noise."
+  }
+}

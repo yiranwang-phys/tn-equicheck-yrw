@@ -1,0 +1,12 @@
+OUTPUT DIR: C:\Users\psych\projects\tn-equicheck-yrw\outputs\experiments\final_test_spacetime_zone_suite\n5_d4_seed0\20251230-013715
+elapsed_sec=16.70
+task=grid
+workers=32, blas_threads=1, chunk=50
+n=5, depth=4, seed=0
+gamma=0.01, traj=500
+m_steps=41
+
+Saved: meta.json, results.json
+If task includes time: time_sweep_*.png
+If task includes space: space_sweep_*.png
+If task includes grid:  grid_error_heatmap_prefix_prefix.png

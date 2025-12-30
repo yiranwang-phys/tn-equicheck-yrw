@@ -1,0 +1,27 @@
+{
+  "time": "2025-12-30T02:17:59.394229",
+  "platform": "Windows-11-10.0.26100-SP0",
+  "python": "3.13.9",
+  "task": "all",
+  "n": 6,
+  "depth": 6,
+  "seed": 0,
+  "traj": 2000,
+  "traj_ref": 10000,
+  "chunk": 50,
+  "workers": 32,
+  "blas_threads": 1,
+  "do_yaqs_equicheck": 1,
+  "gamma": 0.01,
+  "gamma_sweep": {
+    "min_exp": -3,
+    "max_exp": -1,
+    "num": 40
+  },
+  "batch_list": "10,20,30,40,50,80,100,150,200,300,500,800,1000",
+  "notes": {
+    "metric_main": "trace_fidelity = |Tr(U U'^\u2020)| / 2^n (global phase insensitive)",
+    "yaqs_equicheck": "if available, report pass_rate over trajectories (bool output).",
+    "mc_goal": "mentor request: average equivalence metric over many noisy circuits (Monte Carlo)."
+  }
+}

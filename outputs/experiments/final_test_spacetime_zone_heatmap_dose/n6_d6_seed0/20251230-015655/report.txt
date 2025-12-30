@@ -1,0 +1,11 @@
+OUTPUT DIR: C:\Users\psych\projects\tn-equicheck-yrw\outputs\experiments\final_test_spacetime_zone_heatmap_dose\n6_d6_seed0\20251230-015655
+elapsed_sec=277.37
+n=6, depth=6, gamma=0.01, traj=2000
+workers=32, blas_threads=1, chunk=50
+
+Saved:
+  spacetime_zone_error_heatmap.png
+  spacetime_zone_dose_heatmap.png
+  spacetime_zone_mean_noise_ops_heatmap.png
+  error_vs_dose_scatter.png
+  meanF_grid.npy, meanNoiseOps_grid.npy, S_grid.npy, dose_grid.npy

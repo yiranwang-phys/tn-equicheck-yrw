@@ -1,0 +1,8 @@
+OUTPUT DIR: C:\Users\psych\projects\tn-equicheck-yrw\outputs\experiments\final_test_equicheck_mc_suite\n6_d6_seed0\20251230-021759
+elapsed_sec=252.01
+task=all
+workers=32, blas_threads=1, chunk=50
+
+Saved: meta.json, results.json
+If task includes mc:     equiv_mc_convergence_loglog.png, equiv_std_vs_m_loglog.png
+If task includes gamma:  equiv_mean_traceF_vs_gamma_logx.png (+ yaqs passrate plot if available)

@@ -1,0 +1,10 @@
+OUTPUT DIR: C:\Users\psych\projects\tn-equicheck-yrw\outputs\experiments\final_test_strongsim_suite\n5_d4_seed0\20251230-010158
+elapsed_sec=132.05
+task=gamma
+workers=16, blas_threads=1, chunk=50
+noise_kind=depolarizing_xyz
+
+Saved: meta.json, results.json
+If task includes gamma:  error_vs_gamma_loglog.png, meanF_vs_gamma_logx.png
+If task includes shift:  angle_shift_families_logx.png, angle_shift_only_*.png
+If task includes mc:     fidelities_ref.npy, mc_convergence_loglog.png, mc_batchmean_std_loglog.png
