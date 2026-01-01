@@ -1,0 +1,16 @@
+OUTPUT DIR: C:\Users\psych\projects\tn-equicheck-yrw\outputs\experiments\final_test_zone_sensitivity_mitigation\n6_d6_seed0\20260101-202714
+elapsed_sec=1184.46
+task=all
+n=6, depth=6, gamma=0.01, traj=2000
+workers=32, blas_threads=1, chunk=50
+
+Saved (depending on task):
+  sensitivity_error_heatmap.png
+  sensitivity_dose_heatmap.png
+  sensitivity_c_hat_heatmap.png
+  interaction_synergy_vs_gamma.png
+  interaction_additivity_scatter.png
+  protected_sites_inst_qubit.png
+  mitigation_meanF_vs_alpha.png
+  mitigation_relative_error_vs_alpha.png
+  meta.json (+ *_results.json, *.npy)
