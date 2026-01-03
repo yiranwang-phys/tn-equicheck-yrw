@@ -5,12 +5,8 @@ from datetime import datetime
 from pathlib import Path
 
 IGNORE_DIRS = {
-    ".git", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache",
-    ".idea", ".vscode", ".ipynb_checkpoints",
-    "venv", ".venv", "env",
-    "build", "dist", "egg-info", "*.egg-info",
-    "node_modules",
-    "outputs",  # 你项目里常见的大输出目录，默认不打包
+    "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache",
+    ".ipynb_checkpoints",
 }
 
 INCLUDE_EXTS = {".py", ".md", ".toml", ".json", ".yaml", ".yml", ".txt"}
@@ -20,40 +16,25 @@ def _ts() -> str:
     return datetime.now().strftime("%Y%m%d-%H%M%S")
 
 
-def _is_ignored_dirname(name: str) -> bool:
-    if name in IGNORE_DIRS:
-        return True
-    # handle patterns like "*.egg-info"
-    if name.endswith(".egg-info"):
-        return True
-    return False
-
-
 def pack_tree(base_dir: Path, output_file: Path) -> None:
     base_dir = base_dir.resolve()
     output_file = output_file.resolve()
     output_file.parent.mkdir(parents=True, exist_ok=True)
 
+    if not base_dir.exists():
+        raise FileNotFoundError(f"Base dir not found: {base_dir}")
+
     files = []
     for p in base_dir.rglob("*"):
         if not p.is_file():
             continue
-
-        # skip ignored directories
         rel_parts = p.relative_to(base_dir).parts
-        if any(_is_ignored_dirname(part) for part in rel_parts[:-1]):
+        if any(part in IGNORE_DIRS for part in rel_parts[:-1]):
             continue
-
-        # only include selected extensions
         if p.suffix.lower() not in INCLUDE_EXTS:
             continue
-
-        # do not include pack scripts or the output itself
         if p.resolve() == output_file:
             continue
-        if p.name in {"pack_project.py", "pack_src.py", "pack_scripts.py"}:
-            continue
-
         files.append(p)
 
     files.sort(key=lambda x: x.relative_to(base_dir).as_posix().lower())
@@ -72,7 +53,6 @@ def pack_tree(base_dir: Path, output_file: Path) -> None:
             try:
                 out.write(p.read_text(encoding="utf-8"))
             except UnicodeDecodeError:
-                # fallback: read with replacement to avoid crash
                 out.write(p.read_text(encoding="utf-8", errors="replace"))
             except Exception as e:
                 out.write(f"[ERROR reading file] {e}\n")
@@ -83,13 +63,13 @@ def pack_tree(base_dir: Path, output_file: Path) -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--base", type=str, default=".", help="Base directory to pack (default: repo root).")
-    ap.add_argument("--out", type=str, default="", help="Output txt path (default: dist/project_context_<ts>.txt)")
+    ap.add_argument("--scripts", type=str, default="scripts", help="Scripts directory (default: scripts)")
+    ap.add_argument("--out", type=str, default="", help="Output txt path (default: dist/scripts_context_<ts>.txt)")
     args = ap.parse_args()
 
-    base_dir = Path(args.base)
-    out_path = Path(args.out) if args.out else Path("dist") / f"project_context_{_ts()}.txt"
-    pack_tree(base_dir, out_path)
+    scripts_dir = Path(args.scripts)
+    out_path = Path(args.out) if args.out else Path("dist") / f"scripts_context_{_ts()}.txt"
+    pack_tree(scripts_dir, out_path)
 
 
 if __name__ == "__main__":
