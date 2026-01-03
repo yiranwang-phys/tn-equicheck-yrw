@@ -1,0 +1,32 @@
+{
+  "time": "20260103_160734",
+  "runtime_sec": 775.0196914672852,
+  "baseline": 0.07547215323873396,
+  "best_theta": [
+    0.0008794377073816986,
+    0.0008794377073816986,
+    0.0008794377073816986
+  ],
+  "best_y": 0.06845398079495588,
+  "args": {
+    "n": 5,
+    "depth": 5,
+    "dt": 0.2,
+    "Jx": 1.0,
+    "Jy": 1.0,
+    "Jz": 1.0,
+    "gamma": 0.01,
+    "traj": 1000,
+    "mode": "xyz",
+    "iters": 30,
+    "a": 0.15,
+    "c": 0.1,
+    "alpha": 0.602,
+    "gamma_exp": 0.101,
+    "max_bond_dim": 256,
+    "threshold": 1e-09,
+    "parallel": true,
+    "no_parallel": false,
+    "outdir": "outputs\\2026_1_05_spsa_xyz"
+  }
+}

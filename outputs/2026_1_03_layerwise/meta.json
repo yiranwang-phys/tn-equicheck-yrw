@@ -1,0 +1,23 @@
+{
+  "time": "20260103_154151",
+  "runtime_sec": 30.122998476028442,
+  "args": {
+    "n": 5,
+    "depth": 5,
+    "dt": 0.2,
+    "Jx": 1.0,
+    "Jy": 1.0,
+    "Jz": 1.0,
+    "hx": 0.0,
+    "hy": 0.0,
+    "hz": 0.0,
+    "gamma": 0.01,
+    "traj": 1000,
+    "deltas": "0.0,0.2,-0.2",
+    "max_bond_dim": 256,
+    "threshold": 1e-09,
+    "parallel": true,
+    "no_parallel": false,
+    "outdir": "outputs\\2026_1_03_layerwise"
+  }
+}

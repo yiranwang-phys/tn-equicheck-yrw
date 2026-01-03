@@ -1,0 +1,41 @@
+{
+  "script": "2026_1_02_shift_sweep_heisenberg_termwise_YAQS.py",
+  "time": "20260103_154118",
+  "args": {
+    "n": 5,
+    "depth": 5,
+    "dt": 0.2,
+    "Jx": 1.0,
+    "Jy": 1.0,
+    "Jz": 1.0,
+    "noise": "pauli_xyz",
+    "gamma": 0.01,
+    "traj": 1000,
+    "delta_min": -6.28318530717959,
+    "delta_max": 6.28318530717959,
+    "delta_points": 201,
+    "linthresh": 0.05,
+    "modes": "xx,yy,zz",
+    "max_bond_dim": 256,
+    "threshold": 1e-09,
+    "parallel": true,
+    "no_parallel": false,
+    "no_progress": false,
+    "outdir": "outputs\\2026_1_02_termwise"
+  },
+  "bests": {
+    "xx": [
+      -0.022834446115588027,
+      0.0704646903118112
+    ],
+    "yy": [
+      -0.01114380040432747,
+      0.0659687233765371
+    ],
+    "zz": [
+      0.3339195557895039,
+      0.06778920876881328
+    ]
+  },
+  "runtime_sec": 5107.175053358078
+}
