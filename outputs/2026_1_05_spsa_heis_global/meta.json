@@ -1,0 +1,34 @@
+{
+  "time": "20260103_203858",
+  "runtime_sec": 667.4969000816345,
+  "baseline": 4.217743951594e-05,
+  "best_theta": [
+    0.00019291275975334766
+  ],
+  "best_y": 3.282474895133558e-05,
+  "args": {
+    "model": "heisenberg",
+    "n": 5,
+    "depth": 5,
+    "dt": 0.2,
+    "Jx": 1.0,
+    "Jy": 1.0,
+    "Jz": 1.0,
+    "Jzz": 1.0,
+    "ising_hx": 0.0,
+    "gamma": 0.01,
+    "traj": 1000,
+    "traj_ref": 10000,
+    "mode": "global",
+    "iters": 25,
+    "a": 0.15,
+    "c": 0.1,
+    "alpha": 0.602,
+    "gamma_exp": 0.101,
+    "max_bond_dim": 256,
+    "threshold": 1e-09,
+    "parallel": true,
+    "no_parallel": false,
+    "outdir": "outputs\\2026_1_05_spsa_heis_global"
+  }
+}

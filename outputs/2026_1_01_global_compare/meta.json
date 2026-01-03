@@ -1,0 +1,44 @@
+{
+  "time": "20260103_174648",
+  "args": {
+    "n": 5,
+    "depth": 5,
+    "dt": 0.2,
+    "Jx": 1.0,
+    "Jy": 1.0,
+    "Jz": 1.0,
+    "hx": 0.0,
+    "hy": 0.0,
+    "hz": 0.0,
+    "Jzz": 1.0,
+    "ising_hx": 0.0,
+    "gamma": 0.01,
+    "traj": 1000,
+    "traj_ref": 10000,
+    "delta_min": -6.28318530717959,
+    "delta_max": 6.28318530717959,
+    "delta_points": 201,
+    "linthresh": 0.05,
+    "max_bond_dim": 256,
+    "threshold": 1e-09,
+    "parallel": true,
+    "no_parallel": false,
+    "no_progress": false,
+    "outdir": "outputs\\2026_1_01_global_compare"
+  },
+  "best": {
+    "heisenberg": {
+      "delta": -0.07196568645312007,
+      "loss": 3.960500959160903e-05
+    },
+    "ising": {
+      "delta": -4.509813624746714,
+      "loss": 8.63294117647051e-06
+    }
+  },
+  "runtime_sec": 2973.4406139850616,
+  "ref": {
+    "traj_ref": 10000,
+    "definition": "no-rotation noisy ref"
+  }
+}

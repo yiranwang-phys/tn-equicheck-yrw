@@ -1,0 +1,65 @@
+{
+  "time": "20260103_201432",
+  "args": {
+    "n": 5,
+    "depth": 5,
+    "dt": 0.2,
+    "Jx": 1.0,
+    "Jy": 1.0,
+    "Jz": 1.0,
+    "Jzz": 1.0,
+    "ising_hx": 0.0,
+    "gamma": 0.01,
+    "traj": 1000,
+    "traj_ref": 10000,
+    "delta_min": -6.28318530717959,
+    "delta_max": 6.28318530717959,
+    "delta_points": 201,
+    "linthresh": 0.05,
+    "modes": "xx,yy,zz",
+    "max_bond_dim": 256,
+    "threshold": 1e-09,
+    "parallel": true,
+    "no_parallel": false,
+    "no_progress": false,
+    "outdir": "outputs\\2026_1_02_termwise_compare"
+  },
+  "best": {
+    "xx": {
+      "heisenberg": {
+        "delta": 0.0,
+        "loss": 2.3626100834097508e-05
+      },
+      "ising": {
+        "delta": -0.25225483250557745,
+        "loss": 1.1440000000000167e-05
+      }
+    },
+    "yy": {
+      "heisenberg": {
+        "delta": 0.0027647931943008217,
+        "loss": 3.5533604623555514e-05
+      },
+      "ising": {
+        "delta": 0.0,
+        "loss": 1.9392941176470682e-05
+      }
+    },
+    "zz": {
+      "heisenberg": {
+        "delta": -0.0356456170733233,
+        "loss": 2.3120720633790436e-05
+      },
+      "ising": {
+        "delta": 0.10555309509314288,
+        "loss": 1.8310588235294193e-05
+      }
+    }
+  },
+  "runtime_sec": 8690.969403505325,
+  "ref": {
+    "traj_ref": 10000,
+    "definition": "no-rotation noisy ref"
+  },
+  "note": "If a model has no gates of a mode (e.g., Ising has no rxx/ryy), n_shifted_gates=0 and the curve is just sampling noise around ref."
+}
